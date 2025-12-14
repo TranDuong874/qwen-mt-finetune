@@ -260,6 +260,8 @@ class TrainingOrchestrator:
                     self.best_checkpoint = adapter_path
                     no_improve = 0
                     print(f"New best BLEU: {bleu:.2f}")
+                    # Push new best model immediately (fault tolerance)
+                    self.push_to_hub()
                 else:
                     no_improve += 1
                     print(f"No improvement ({no_improve}/{patience})")
