@@ -1,0 +1,69 @@
+_wandb:
+    value:
+        cli_version: 0.23.1
+        e:
+            vidrh5zgo7dtvygohh2ihdbdz986bgp9:
+                args:
+                    - --base_model_path
+                    - Qwen/Qwen3-1.7B
+                    - --adapter_model_path
+                    - outputs/smoke_test-part1/best_model
+                    - --test_data_path
+                    - dataset/medical-vlsp-2025/test/test_all.txt
+                    - --run_name
+                    - smoke_test-part1-eval
+                    - --wandb_project
+                    - qwen-mt
+                codePath: evaluate.py
+                codePathLocal: evaluate.py
+                cpu_count: 8
+                cpu_count_logical: 16
+                cudaVersion: "12.8"
+                disk:
+                    /:
+                        total: "1081101176832"
+                        used: "70033285120"
+                email: tranthaiduong.dtt@gmail.com
+                executable: /home/tranduong/qwen-mt-finetune/.venv/bin/python
+                gpu: NVIDIA GeForce RTX 3060 Laptop GPU
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ampere
+                      memoryTotal: "6442450944"
+                      name: NVIDIA GeForce RTX 3060 Laptop GPU
+                      uuid: GPU-9d068952-5824-8c6c-f4c5-84edee332336
+                host: LAPTOP-CIR1GBE3
+                memory:
+                    total: "7988244480"
+                os: Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35
+                program: /home/tranduong/qwen-mt-finetune/evaluate.py
+                python: CPython 3.11.14
+                root: /home/tranduong/qwen-mt-finetune
+                startedAt: "2025-12-14T06:56:11.948958Z"
+                writerId: vidrh5zgo7dtvygohh2ihdbdz986bgp9
+        m: []
+        python_version: 3.11.14
+        t:
+            "1":
+                - 1
+                - 9
+                - 11
+                - 49
+                - 71
+                - 98
+                - 103
+            "2":
+                - 1
+                - 9
+                - 11
+                - 49
+                - 71
+                - 98
+                - 103
+            "3":
+                - 13
+            "4": 3.11.14
+            "5": 0.23.1
+            "6": 4.57.3
+            "12": 0.23.1
+            "13": linux-x86_64

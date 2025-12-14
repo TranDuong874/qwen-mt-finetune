@@ -1,0 +1,22 @@
+Loading checkpoint shards: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:05<00:00,  3.00s/it]
+Creating new LoRA adapter
+trainable params: 17,432,576 || all params: 1,738,007,552 || trainable%: 1.0030
+  0%|                                                                                                                           | 0/10 [00:00<?, ?it/s]`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
+100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 10/10 [00:16<00:00,  1.60s/it]
+{'loss': 2.3718, 'grad_norm': 5.125814914703369, 'learning_rate': 0.0001, 'epoch': 0.1}
+{'loss': 2.3733, 'grad_norm': 3.4567198753356934, 'learning_rate': 9e-05, 'epoch': 0.2}
+                                                                                                                                                       
+{'eval_loss': 3.2743682861328125, 'eval_runtime': 0.5185, 'eval_samples_per_second': 19.287, 'eval_steps_per_second': 3.857, 'epoch': 0.2}
+{'loss': 3.0599, 'grad_norm': 6.065614223480225, 'learning_rate': 8e-05, 'epoch': 0.3}
+{'loss': 2.8736, 'grad_norm': 5.878565788269043, 'learning_rate': 7e-05, 'epoch': 0.4}
+{'eval_loss': 3.201943874359131, 'eval_runtime': 0.475, 'eval_samples_per_second': 21.052, 'eval_steps_per_second': 4.21, 'epoch': 0.4}
+{'loss': 2.9249, 'grad_norm': 5.619344711303711, 'learning_rate': 6e-05, 'epoch': 0.5}
+{'loss': 3.9927, 'grad_norm': inf, 'learning_rate': 5e-05, 'epoch': 0.6}
+{'eval_loss': 3.1698660850524902, 'eval_runtime': 0.4693, 'eval_samples_per_second': 21.31, 'eval_steps_per_second': 4.262, 'epoch': 0.6}
+{'loss': 2.9127, 'grad_norm': 4.637859344482422, 'learning_rate': 4e-05, 'epoch': 0.7}
+{'loss': 2.1307, 'grad_norm': 2.896817684173584, 'learning_rate': 3e-05, 'epoch': 0.8}
+{'eval_loss': 3.133654832839966, 'eval_runtime': 0.4768, 'eval_samples_per_second': 20.972, 'eval_steps_per_second': 4.194, 'epoch': 0.8}
+{'loss': 4.2305, 'grad_norm': 8.06004524230957, 'learning_rate': 2e-05, 'epoch': 0.9}
+{'loss': 2.7404, 'grad_norm': 4.32517147064209, 'learning_rate': 1e-05, 'epoch': 1.0}
+{'eval_loss': 3.1178581714630127, 'eval_runtime': 0.479, 'eval_samples_per_second': 20.878, 'eval_steps_per_second': 4.176, 'epoch': 1.0}
+{'train_runtime': 16.0147, 'train_samples_per_second': 0.624, 'train_steps_per_second': 0.624, 'train_loss': 2.961047625541687, 'epoch': 1.0}

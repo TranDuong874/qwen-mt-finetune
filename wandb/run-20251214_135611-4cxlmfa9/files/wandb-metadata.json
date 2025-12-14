@@ -1,0 +1,47 @@
+{
+  "os":  "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+  "python":  "CPython 3.11.14",
+  "startedAt":  "2025-12-14T06:56:11.948958Z",
+  "args":  [
+    "--base_model_path",
+    "Qwen/Qwen3-1.7B",
+    "--adapter_model_path",
+    "outputs/smoke_test-part1/best_model",
+    "--test_data_path",
+    "dataset/medical-vlsp-2025/test/test_all.txt",
+    "--run_name",
+    "smoke_test-part1-eval",
+    "--wandb_project",
+    "qwen-mt"
+  ],
+  "program":  "/home/tranduong/qwen-mt-finetune/evaluate.py",
+  "codePath":  "evaluate.py",
+  "codePathLocal":  "evaluate.py",
+  "email":  "tranthaiduong.dtt@gmail.com",
+  "root":  "/home/tranduong/qwen-mt-finetune",
+  "host":  "LAPTOP-CIR1GBE3",
+  "executable":  "/home/tranduong/qwen-mt-finetune/.venv/bin/python",
+  "cpu_count":  8,
+  "cpu_count_logical":  16,
+  "gpu":  "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "1081101176832",
+      "used":  "70033285120"
+    }
+  },
+  "memory":  {
+    "total":  "7988244480"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA GeForce RTX 3060 Laptop GPU",
+      "memoryTotal":  "6442450944",
+      "architecture":  "Ampere",
+      "uuid":  "GPU-9d068952-5824-8c6c-f4c5-84edee332336"
+    }
+  ],
+  "cudaVersion":  "12.8",
+  "writerId":  "vidrh5zgo7dtvygohh2ihdbdz986bgp9"
+}

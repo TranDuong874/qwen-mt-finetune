@@ -1,0 +1,30 @@
+Generating train split: 100000 examples [00:00, 160913.26 examples/s]
+Generating valid split: 20002 examples [00:00, 364988.66 examples/s]
+Traceback (most recent call last):
+  File "/home/tranduong/.local/share/uv/python/cpython-3.11.14-linux-x86_64-gnu/lib/python3.11/importlib/metadata/__init__.py", line 563, in from_name
+    return next(cls.discover(name=name))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+StopIteration
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/tranduong/qwen-mt-finetune/train.py", line 154, in <module>
+    train(
+  File "/home/tranduong/qwen-mt-finetune/train.py", line 49, in train
+    bnb_config = BitsAndBytesConfig(
+                 ^^^^^^^^^^^^^^^^^^^
+  File "/home/tranduong/qwen-mt-finetune/.venv/lib/python3.11/site-packages/transformers/utils/quantization_config.py", line 510, in __init__
+    self.post_init()
+  File "/home/tranduong/qwen-mt-finetune/.venv/lib/python3.11/site-packages/transformers/utils/quantization_config.py", line 568, in post_init
+    if self.load_in_4bit and not version.parse(importlib.metadata.version("bitsandbytes")) >= version.parse(
+                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tranduong/.local/share/uv/python/cpython-3.11.14-linux-x86_64-gnu/lib/python3.11/importlib/metadata/__init__.py", line 1009, in version
+    return distribution(distribution_name).version
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tranduong/.local/share/uv/python/cpython-3.11.14-linux-x86_64-gnu/lib/python3.11/importlib/metadata/__init__.py", line 982, in distribution
+    return Distribution.from_name(distribution_name)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tranduong/.local/share/uv/python/cpython-3.11.14-linux-x86_64-gnu/lib/python3.11/importlib/metadata/__init__.py", line 565, in from_name
+    raise PackageNotFoundError(name)
+importlib.metadata.PackageNotFoundError: No package metadata was found for bitsandbytes
