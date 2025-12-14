@@ -152,25 +152,22 @@ def train(
                 source_text = ""
                 target_text = text
 
-            full_text = source_text + target_text + " " + tokenizer.eos_token
+            # Tokenize source and target SEPARATELY then concatenate
+            # This ensures labels align correctly with input_ids
+            source_ids = tokenizer(source_text, add_special_tokens=False)["input_ids"] if source_text else []
+            target_ids = tokenizer(target_text + tokenizer.eos_token, add_special_tokens=False)["input_ids"]
 
-            # Tokenize full sequence
-            encoded = tokenizer(
-                full_text,
-                truncation=True,
-                max_length=max_length,
-                return_tensors=None,
-            )
-
-            input_ids = encoded["input_ids"]
-            attention_mask = encoded["attention_mask"]
-
-            # Find where target starts by tokenizing source alone
-            if source_text:
-                source_encoded = tokenizer(source_text, return_tensors=None)
-                source_len = len(source_encoded["input_ids"])
+            # Concatenate and truncate if needed
+            input_ids = source_ids + target_ids
+            if len(input_ids) > max_length:
+                input_ids = input_ids[:max_length]
+                # Adjust source/target split for truncation
+                source_len = min(len(source_ids), max_length)
+                target_len = max_length - source_len
             else:
-                source_len = 0
+                source_len = len(source_ids)
+
+            attention_mask = [1] * len(input_ids)
 
             # Create labels: -100 for source tokens (ignored in loss), actual ids for target
             labels = [-100] * source_len + input_ids[source_len:]

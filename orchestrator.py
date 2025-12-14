@@ -188,13 +188,14 @@ class TrainingOrchestrator:
         except Exception as e:
             print(f"Repo creation note: {e}")
 
-        # Upload adapter folder
+        # Upload adapter folder (clean upload - delete old files first)
         api.upload_folder(
             folder_path=self.best_checkpoint,
             repo_id=repo_id,
             repo_type="model",
             commit_message=f"Best model - BLEU: {self.best_bleu:.2f}",
             token=os.getenv("HUGGING_FACE_TOKEN"),
+            delete_patterns=["*"],  # Delete all existing files before upload
         )
         print(f"Model pushed to https://huggingface.co/{repo_id}")
 
