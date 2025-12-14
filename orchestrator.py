@@ -115,10 +115,30 @@ class TrainingOrchestrator:
         ]
 
         print(f"Evaluating part {part_idx + 1}...")
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
-        # Parse JSON output from evaluate.py
-        metrics = json.loads(result.stdout.strip().split("\n")[-1])
+        # Run with output streaming (tqdm visible), capture only for JSON parsing
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=None,  # Let stderr (tqdm) go to terminal
+            text=True,
+            bufsize=1,
+        )
+
+        # Collect stdout lines while letting stderr stream
+        stdout_lines = []
+        for line in process.stdout:
+            stdout_lines.append(line)
+            # Print non-JSON lines (progress messages)
+            if not line.strip().startswith('{'):
+                print(line, end='')
+
+        process.wait()
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, cmd)
+
+        # Parse JSON output from last line
+        metrics = json.loads(stdout_lines[-1].strip())
         return metrics
 
     def log_examples_to_wandb(self, part_idx: int) -> None:

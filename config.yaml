@@ -1,8 +1,8 @@
 # Experiment
-experiment_name: "qwen-medical-mt"
+experiment_name: "ex_1"
 
 # Model
-base_model: "Qwen/Qwen3-1.7B"
+base_model: "Qwen/Qwen2.5-3B"
 lora:
   r: 16
   alpha: 32
@@ -34,26 +34,28 @@ dataset:
 
 # Training
 training:
-  num_gpus: 2
-  per_device_batch_size: 1
+  num_gpus: 1
+  per_device_batch_size: 16
   gradient_accumulation_steps: 1
   num_epochs: 1
-  learning_rate: 1.0e-4
+  learning_rate: 2.0e-4
   warmup_ratio: 0.0
   max_seq_length: 512
-  fp16: true
+  fp16: false
+  bf16: true
   gradient_checkpointing: true
-  save_steps: 500
-  eval_steps: 500
-  logging_steps: 10
+  save_steps: 2000
+  eval_steps: 2000
+  logging_steps: 100
   save_total_limit: 1
+  scheduler: cosine
 
 # Evaluation
 evaluation:
   max_new_tokens: 128
-  generation_batch_size: 8
+  generation_batch_size: 32
   comet_model: "Unbabel/wmt22-comet-da"
-  comet_batch_size: 8
+  comet_batch_size: 32
   log_examples: true
   num_examples_to_log: 100
 
