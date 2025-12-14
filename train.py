@@ -16,7 +16,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
-    DataCollatorForLanguageModeling,
+    DataCollatorForSeq2Seq,
     Trainer,
     TrainingArguments,
 )
@@ -124,14 +124,68 @@ def train(
     tokenizer.pad_token = tokenizer.eos_token
     model.config.pad_token_id = tokenizer.eos_token_id
 
-    # Tokenize dataset
+    # Tokenize dataset with masked labels (only compute loss on target tokens)
     max_length = config["training"]["max_seq_length"]
 
-    def tokenize(batch):
-        texts = [t.strip() + " " + tokenizer.eos_token for t in batch["text"]]
-        return tokenizer(texts, truncation=True, max_length=max_length)
+    def tokenize_with_masked_labels(batch):
+        """Tokenize and mask source tokens so loss is only on target."""
+        all_input_ids = []
+        all_attention_mask = []
+        all_labels = []
 
-    tokenized = dataset.map(tokenize, batched=True, remove_columns=["text"])
+        for text in batch["text"]:
+            text = text.strip()
+
+            # Parse source and target based on format
+            if text.startswith("[EN]") and "[VI]" in text:
+                # EN -> VI translation
+                parts = text.split("[VI]")
+                source_text = parts[0]  # includes [EN]
+                target_text = "[VI]" + parts[1] if len(parts) > 1 else "[VI]"
+            elif text.startswith("[VI]") and "[EN]" in text:
+                # VI -> EN translation
+                parts = text.split("[EN]")
+                source_text = parts[0]  # includes [VI]
+                target_text = "[EN]" + parts[1] if len(parts) > 1 else "[EN]"
+            else:
+                # Fallback: treat entire text as target (old behavior)
+                source_text = ""
+                target_text = text
+
+            full_text = source_text + target_text + " " + tokenizer.eos_token
+
+            # Tokenize full sequence
+            encoded = tokenizer(
+                full_text,
+                truncation=True,
+                max_length=max_length,
+                return_tensors=None,
+            )
+
+            input_ids = encoded["input_ids"]
+            attention_mask = encoded["attention_mask"]
+
+            # Find where target starts by tokenizing source alone
+            if source_text:
+                source_encoded = tokenizer(source_text, return_tensors=None)
+                source_len = len(source_encoded["input_ids"])
+            else:
+                source_len = 0
+
+            # Create labels: -100 for source tokens (ignored in loss), actual ids for target
+            labels = [-100] * source_len + input_ids[source_len:]
+
+            all_input_ids.append(input_ids)
+            all_attention_mask.append(attention_mask)
+            all_labels.append(labels)
+
+        return {
+            "input_ids": all_input_ids,
+            "attention_mask": all_attention_mask,
+            "labels": all_labels,
+        }
+
+    tokenized = dataset.map(tokenize_with_masked_labels, batched=True, remove_columns=["text"])
 
     # Training args from config
     train_cfg = config["training"]
@@ -158,13 +212,13 @@ def train(
         save_only_model=True,
     )
 
-    # Trainer
+    # Trainer with DataCollatorForSeq2Seq (respects our masked labels)
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=tokenized["train"],
         eval_dataset=tokenized["valid"],
-        data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
+        data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True),
     )
 
     # Train

@@ -53,11 +53,11 @@ training:
 # Evaluation
 evaluation:
   max_new_tokens: 128
-  generation_batch_size: 32
+  generation_batch_size: 64
   comet_model: "Unbabel/wmt22-comet-da"
-  comet_batch_size: 32
+  comet_batch_size: 64
   log_examples: true
-  num_examples_to_log: 100
+  num_examples_to_log: 5
 
 # Early stopping
 early_stopping:

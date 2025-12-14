@@ -48,6 +48,8 @@ def batch_generate(model, tokenizer, prompts: list, max_new_tokens: int) -> list
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            repetition_penalty=1.2,
         )
 
     # Decode outputs
@@ -57,9 +59,32 @@ def batch_generate(model, tokenizer, prompts: list, max_new_tokens: int) -> list
         input_len = inputs["attention_mask"][i].sum().item()
         generated = output[input_len:]
         text = tokenizer.decode(generated, skip_special_tokens=True)
+        # Post-process: extract only target translation
+        text = clean_prediction(text)
         predictions.append(text.strip())
 
     return predictions
+
+
+def clean_prediction(text: str) -> str:
+    """Clean prediction to extract only the target translation."""
+    import re
+
+    # If output contains [VI], extract text after it
+    if "[VI]" in text:
+        text = text.split("[VI]")[-1].strip()
+
+    # If output contains [EN], extract text after it (for vi2en)
+    if "[EN]" in text:
+        text = text.split("[EN]")[-1].strip()
+
+    # Remove repetitive number patterns like "1. 1. 1." or "2. 2. 2."
+    text = re.sub(r'(\d+\.\s*){3,}.*$', '', text)
+
+    # Remove trailing numbers and dots
+    text = re.sub(r'[\s\d\.]+$', '', text)
+
+    return text.strip()
 
 
 def save_examples(
