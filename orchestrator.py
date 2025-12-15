@@ -215,15 +215,26 @@ class TrainingOrchestrator:
         """Run full curriculum training pipeline."""
         # Initialize single W&B run for eval metrics (line charts)
         self._init_wandb()
+        curriculum_cfg = self.config.get("curriculum", {})
+        start_from_part = curriculum_cfg.get("start_from_part", 1)
+        initial_adapter_path = curriculum_cfg.get("initial_adapter_path", None)
 
-        adapter_path = None
+        adapter_path = initial_adapter_path
         no_improve = 0
         num_parts = self.config["dataset"]["num_parts"]
         patience = self.config["early_stopping"]["patience"]
         min_delta = self.config["early_stopping"]["min_delta"]
 
+        # Convert to 0-indexed
+        start_idx = start_from_part - 1
+
+        if start_idx > 0:
+            print(f"\nStarting from part {start_from_part} (skipping parts 1-{start_from_part - 1})")
+        if initial_adapter_path:
+            print(f"Using initial adapter: {initial_adapter_path}\n")
+
         try:
-            for i in range(num_parts):
+            for i in range(start_idx, num_parts):
                 print(f"\n{'=' * 60}")
                 print(f"Part {i + 1}/{num_parts}")
                 print(f"{'=' * 60}")

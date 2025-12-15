@@ -70,12 +70,21 @@ def clean_prediction(text: str) -> str:
     """Clean prediction to extract only the target translation."""
     import re
 
-    # If output contains [VI], extract text after it
-    if "[VI]" in text:
+    # Extract text after the target language tag
+    # If both tags present, take the last one (the actual translation)
+    if "[VI]" in text and "[EN]" in text:
+        # Both present - take whichever comes last
+        vi_pos = text.rfind("[VI]")
+        en_pos = text.rfind("[EN]")
+        if vi_pos > en_pos:
+            text = text.split("[VI]")[-1].strip()
+        else:
+            text = text.split("[EN]")[-1].strip()
+    elif "[VI]" in text:
+        # Only VI tag - extract after it
         text = text.split("[VI]")[-1].strip()
-
-    # If output contains [EN], extract text after it (for vi2en)
-    if "[EN]" in text:
+    elif "[EN]" in text:
+        # Only EN tag - extract after it
         text = text.split("[EN]")[-1].strip()
 
     # Remove repetitive number patterns like "1. 1. 1." or "2. 2. 2."
@@ -162,19 +171,49 @@ def evaluate(
         test_lines = test_lines[:max_samples]
         print(f"Limited to {len(test_lines)} test samples")
 
-    # Parse test data
+    # Parse test data (supports both EN->VI and VI->EN)
     sources = []
     prompts = []
     references = []
+    skipped_count = 0
 
     for line in test_lines:
-        parts = line.strip().split("[VI]")
-        prompt = parts[0] + "[VI]"
-        reference = parts[1].strip() if len(parts) > 1 else ""
+        line = line.strip()
+        if not line:
+            continue
 
-        sources.append(parts[0].replace("[EN]", "").strip())
+        # Detect direction based on which tag comes first
+        if line.startswith("[EN]"):
+            # EN -> VI translation
+            parts = line.split("[VI]")
+            if len(parts) == 2:
+                source = parts[0].replace("[EN]", "").strip()
+                reference = parts[1].strip()
+                prompt = parts[0] + "[VI]"
+            else:
+                skipped_count += 1
+                continue  # Skip malformed lines
+        elif line.startswith("[VI]"):
+            # VI -> EN translation
+            parts = line.split("[EN]")
+            if len(parts) == 2:
+                source = parts[0].replace("[VI]", "").strip()
+                reference = parts[1].strip()
+                prompt = parts[0] + "[EN]"
+            else:
+                skipped_count += 1
+                continue  # Skip malformed lines
+        else:
+            skipped_count += 1
+            continue  # Skip lines without proper tags
+
+        sources.append(source)
         prompts.append(prompt)
         references.append(reference)
+
+    if skipped_count > 0:
+        print(f"Warning: Skipped {skipped_count} malformed lines")
+    print(f"Loaded {len(sources)} valid test samples")
 
     # Batched generation
     eval_cfg = config["evaluation"]
