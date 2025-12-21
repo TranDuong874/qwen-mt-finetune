@@ -51,6 +51,7 @@ training:
 
 # Evaluation (for evaluate.py)
 evaluation:
+  max_samples: 10000  # Set high to evaluate all test samples
   max_new_tokens: 256
   generation_batch_size: 32
   comet_model: "Unbabel/wmt22-comet-da"
