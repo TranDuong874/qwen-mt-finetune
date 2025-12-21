@@ -180,6 +180,7 @@ def evaluate(
 
     print(f"Loading adapter from {adapter_model_path}")
     hf_token = os.getenv("HUGGING_FACE_TOKEN")
+    print(f"Using HF token: {hf_token[:10]}..." if hf_token else "WARNING: No HF token found!")
     model = PeftModel.from_pretrained(base_model, adapter_model_path, token=hf_token)
     tokenizer = AutoTokenizer.from_pretrained(adapter_model_path, token=hf_token)
     model.eval()
