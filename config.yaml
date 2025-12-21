@@ -19,10 +19,9 @@ lora:
     - "up_proj"
     - "down_proj"
 
-# Quantization (QLoRA) - disabled for multi-GPU DDP
-# Set load_in_4bit: true for single-GPU with limited VRAM
+# Quantization (QLoRA)
 quantization:
-  load_in_4bit: false
+  load_in_4bit: true
   bnb_4bit_quant_type: "nf4"
   bnb_4bit_compute_dtype: "bfloat16"
   bnb_4bit_use_double_quant: true
