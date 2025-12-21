@@ -55,13 +55,12 @@ class TranslationDataset(IterableDataset):
         self.seed = seed
         self.max_samples = max_samples
 
-        # Load dataset - either from HF or local CSV
+        # Load dataset - either from HF or local CSV (no streaming for speed)
         if local_path:
             self.dataset = load_dataset(
                 "csv",
                 data_files={split: local_path},
                 split=split,
-                streaming=True,
             )
         else:
             # Map split names to CSV file paths
@@ -74,12 +73,11 @@ class TranslationDataset(IterableDataset):
                 hf_repo,
                 data_files={split: split_to_file.get(split, f"cleaned_data/{split}.csv")},
                 split=split,
-                streaming=True,
                 token=os.getenv("HUGGING_FACE_TOKEN"),
             )
 
         if split == "train":
-            self.dataset = self.dataset.shuffle(seed=seed, buffer_size=10000)
+            self.dataset = self.dataset.shuffle(seed=seed)
 
     def __iter__(self) -> Iterator[Dict]:
         count = 0

@@ -32,9 +32,9 @@ dataset:
 
 # Training
 training:
-  max_steps: 20000
-  per_device_batch_size: 16
-  gradient_accumulation_steps: 2
+  max_steps: 42000
+  per_device_batch_size: 8
+  gradient_accumulation_steps: 4
   learning_rate: 2.0e-4
   warmup_ratio: 0.03
   max_seq_length: 512
