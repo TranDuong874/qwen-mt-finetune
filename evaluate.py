@@ -179,8 +179,11 @@ def evaluate(
     )
 
     print(f"Loading adapter from {adapter_model_path}")
-    model = PeftModel.from_pretrained(base_model, adapter_model_path)
-    tokenizer = AutoTokenizer.from_pretrained(adapter_model_path)
+    hf_token = os.getenv("HUGGING_FACE_TOKEN")
+    print(f"Using HF token: {hf_token[:10]}..." if hf_token else "WARNING: No HF token found!")
+    model = PeftModel.from_pretrained(base_model, adapter_model_path, token=hf_token)
+    # Load tokenizer from base model (same tokenizer, avoids auth issues with private adapter repo)
+    tokenizer = AutoTokenizer.from_pretrained(config["base_model"])
     model.eval()
 
     # Load test dataset from HuggingFace
