@@ -179,8 +179,9 @@ def evaluate(
     )
 
     print(f"Loading adapter from {adapter_model_path}")
-    model = PeftModel.from_pretrained(base_model, adapter_model_path)
-    tokenizer = AutoTokenizer.from_pretrained(adapter_model_path)
+    hf_token = os.getenv("HUGGING_FACE_TOKEN")
+    model = PeftModel.from_pretrained(base_model, adapter_model_path, token=hf_token)
+    tokenizer = AutoTokenizer.from_pretrained(adapter_model_path, token=hf_token)
     model.eval()
 
     # Load test dataset from HuggingFace
