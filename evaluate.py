@@ -1,17 +1,17 @@
-# evaluate.py
 """
 Evaluation script for translation quality metrics.
-Computes BLEU, chrF++, and COMET scores with batched generation.
-Logs examples to JSON and W&B table.
+Computes BLEU, chrF++, COMET, and perplexity scores with batched generation.
 """
 import argparse
 import json
+import math
 import os
 import random
 
 import torch
 import yaml
 from comet import download_model, load_from_checkpoint
+from datasets import load_dataset
 from dotenv import load_dotenv
 from peft import PeftModel
 from sacrebleu import corpus_bleu, corpus_chrf
@@ -29,8 +29,7 @@ def load_config(config_path: str) -> dict:
 
 def batch_generate(model, tokenizer, prompts: list, max_new_tokens: int) -> list:
     """Generate translations for a batch of prompts."""
-    # Tokenize with padding
-    tokenizer.padding_side = "left"  # For decoder-only models
+    tokenizer.padding_side = "left"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -52,14 +51,11 @@ def batch_generate(model, tokenizer, prompts: list, max_new_tokens: int) -> list
             repetition_penalty=1.2,
         )
 
-    # Decode outputs
     predictions = []
     for i, output in enumerate(outputs):
-        # Remove input tokens from output
         input_len = inputs["attention_mask"][i].sum().item()
         generated = output[input_len:]
         text = tokenizer.decode(generated, skip_special_tokens=True)
-        # Post-process: extract only target translation
         text = clean_prediction(text)
         predictions.append(text.strip())
 
@@ -70,10 +66,7 @@ def clean_prediction(text: str) -> str:
     """Clean prediction to extract only the target translation."""
     import re
 
-    # Extract text after the target language tag
-    # If both tags present, take the last one (the actual translation)
     if "[VI]" in text and "[EN]" in text:
-        # Both present - take whichever comes last
         vi_pos = text.rfind("[VI]")
         en_pos = text.rfind("[EN]")
         if vi_pos > en_pos:
@@ -81,19 +74,53 @@ def clean_prediction(text: str) -> str:
         else:
             text = text.split("[EN]")[-1].strip()
     elif "[VI]" in text:
-        # Only VI tag - extract after it
         text = text.split("[VI]")[-1].strip()
     elif "[EN]" in text:
-        # Only EN tag - extract after it
         text = text.split("[EN]")[-1].strip()
 
-    # Remove repetitive number patterns like "1. 1. 1." or "2. 2. 2."
     text = re.sub(r'(\d+\.\s*){3,}.*$', '', text)
-
-    # Remove trailing numbers and dots
     text = re.sub(r'[\s\d\.]+$', '', text)
 
     return text.strip()
+
+
+def compute_perplexity(model, tokenizer, dataset, max_samples: int = 1000) -> float:
+    """Compute perplexity on the dataset."""
+    model.eval()
+    total_loss = 0.0
+    total_tokens = 0
+
+    samples = list(dataset.take(max_samples))
+
+    for example in tqdm(samples, desc="Computing perplexity"):
+        src = str(example.get("src", "")).strip()
+        tgt = str(example.get("tgt", "")).strip()
+
+        if not src or not tgt:
+            continue
+
+        # Format: [lang] source target
+        text = f"{src} {tgt}{tokenizer.eos_token}"
+
+        inputs = tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
+        ).to(model.device)
+
+        with torch.no_grad():
+            outputs = model(**inputs, labels=inputs["input_ids"])
+            loss = outputs.loss.item()
+
+        num_tokens = inputs["attention_mask"].sum().item()
+        total_loss += loss * num_tokens
+        total_tokens += num_tokens
+
+    avg_loss = total_loss / total_tokens if total_tokens > 0 else float("inf")
+    perplexity = math.exp(avg_loss)
+
+    return perplexity
 
 
 def save_examples(
@@ -102,14 +129,11 @@ def save_examples(
     references: list,
     output_path: str,
     num_examples: int,
-    config: dict,
-    part: int,
 ) -> list:
-    """Save random examples to JSON and return sampled data for W&B."""
-    # Sample random indices
+    """Save random examples to JSON."""
     indices = list(range(len(sources)))
     if len(indices) > num_examples:
-        random.seed(42)  # Reproducible sampling
+        random.seed(42)
         indices = random.sample(indices, num_examples)
 
     examples = []
@@ -120,7 +144,6 @@ def save_examples(
             "reference": references[idx],
         })
 
-    # Save to JSON
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(examples, f, ensure_ascii=False, indent=2)
@@ -132,125 +155,133 @@ def save_examples(
 def evaluate(
     config: dict,
     adapter_model_path: str,
-    test_data_path: str,
-    part: int,
     output_dir: str,
+    test_split: str = "test",
 ) -> dict:
-    """Evaluate model on test set and return metrics.
-
-    Note: W&B logging is handled by orchestrator for unified eval run.
-    This function just computes metrics and saves examples to JSON.
-    """
+    """Evaluate model on test set and return metrics."""
     # Quantization config
-    quant_cfg = config["quantization"]
-    compute_dtype = getattr(torch, quant_cfg["bnb_4bit_compute_dtype"])
+    quant_cfg = config.get("quantization", {})
+    compute_dtype = getattr(torch, quant_cfg.get("bnb_4bit_compute_dtype", "bfloat16"))
     bnb_config = BitsAndBytesConfig(
-        load_in_4bit=quant_cfg["load_in_4bit"],
-        bnb_4bit_quant_type=quant_cfg["bnb_4bit_quant_type"],
+        load_in_4bit=quant_cfg.get("load_in_4bit", True),
+        bnb_4bit_quant_type=quant_cfg.get("bnb_4bit_quant_type", "nf4"),
         bnb_4bit_compute_dtype=compute_dtype,
-        bnb_4bit_use_double_quant=quant_cfg["bnb_4bit_use_double_quant"],
+        bnb_4bit_use_double_quant=quant_cfg.get("bnb_4bit_use_double_quant", True),
     )
 
     # Load model
+    print(f"Loading base model: {config['base_model']}")
     base_model = AutoModelForCausalLM.from_pretrained(
         config["base_model"],
         quantization_config=bnb_config,
         device_map="auto",
+        trust_remote_code=True,
     )
+
+    print(f"Loading adapter from {adapter_model_path}")
     model = PeftModel.from_pretrained(base_model, adapter_model_path)
     tokenizer = AutoTokenizer.from_pretrained(adapter_model_path)
     model.eval()
 
-    # Load test data
-    with open(test_data_path, "r", encoding="utf-8") as f:
-        test_lines = f.readlines()
+    # Load test dataset from HuggingFace
+    dataset_cfg = config.get("dataset", {})
+    hf_repo = dataset_cfg.get("hf_repo", "TranDuong/medical-vlsp-2025")
 
-    # Apply sample limit if configured
-    max_samples = config["dataset"]["max_test_samples"]
-    if max_samples:
-        test_lines = test_lines[:max_samples]
-        print(f"Limited to {len(test_lines)} test samples")
+    print(f"Loading test data from {hf_repo}")
+    split_to_file = {
+        "train": "cleaned_data/train.csv",
+        "validation": "cleaned_data/val.csv",
+        "test": "cleaned_data/test.csv",
+    }
+    test_dataset = load_dataset(
+        hf_repo,
+        data_files={test_split: split_to_file.get(test_split, f"cleaned_data/{test_split}.csv")},
+        split=test_split,
+        streaming=True,
+        token=os.getenv("HUGGING_FACE_TOKEN"),
+    )
 
-    # Parse test data (supports both EN->VI and VI->EN)
+    # Compute perplexity first
+    print("\nComputing perplexity...")
+    perplexity = compute_perplexity(model, tokenizer, test_dataset, max_samples=1000)
+    print(f"Perplexity: {perplexity:.2f}")
+
+    # Reload dataset for translation evaluation
+    test_dataset = load_dataset(
+        hf_repo,
+        data_files={test_split: split_to_file.get(test_split, f"cleaned_data/{test_split}.csv")},
+        split=test_split,
+        streaming=True,
+        token=os.getenv("HUGGING_FACE_TOKEN"),
+    )
+
+    # Parse test data
     sources = []
     prompts = []
     references = []
-    skipped_count = 0
 
-    for line in test_lines:
-        line = line.strip()
-        if not line:
+    eval_cfg = config.get("evaluation", {})
+    max_samples = eval_cfg.get("max_samples", 2000)
+
+    for example in tqdm(test_dataset.take(max_samples), desc="Loading test data"):
+        src = str(example.get("src", "")).strip()
+        tgt = str(example.get("tgt", "")).strip()
+
+        if not src or not tgt:
             continue
 
-        # Detect direction based on which tag comes first
-        if line.startswith("[EN]"):
-            # EN -> VI translation
-            parts = line.split("[VI]")
-            if len(parts) == 2:
-                source = parts[0].replace("[EN]", "").strip()
-                reference = parts[1].strip()
-                prompt = parts[0] + "[VI]"
-            else:
-                skipped_count += 1
-                continue  # Skip malformed lines
-        elif line.startswith("[VI]"):
-            # VI -> EN translation
-            parts = line.split("[EN]")
-            if len(parts) == 2:
-                source = parts[0].replace("[VI]", "").strip()
-                reference = parts[1].strip()
-                prompt = parts[0] + "[EN]"
-            else:
-                skipped_count += 1
-                continue  # Skip malformed lines
-        else:
-            skipped_count += 1
-            continue  # Skip lines without proper tags
+        # src already contains [EN] or [VI] prefix
+        sources.append(src)
+        prompts.append(src + " ")  # Add space for generation
+        references.append(tgt)
 
-        sources.append(source)
-        prompts.append(prompt)
-        references.append(reference)
-
-    if skipped_count > 0:
-        print(f"Warning: Skipped {skipped_count} malformed lines")
-    print(f"Loaded {len(sources)} valid test samples")
+    print(f"Loaded {len(sources)} test samples")
 
     # Batched generation
-    eval_cfg = config["evaluation"]
-    batch_size = eval_cfg.get("generation_batch_size", 8)
+    batch_size = eval_cfg.get("generation_batch_size", 32)
     predictions = []
 
-    for i in tqdm(range(0, len(prompts), batch_size), desc=f"Evaluating part {part}"):
-        batch_prompts = prompts[i : i + batch_size]
+    for i in tqdm(range(0, len(prompts), batch_size), desc="Generating translations"):
+        batch_prompts = prompts[i:i + batch_size]
         batch_preds = batch_generate(
-            model, tokenizer, batch_prompts, eval_cfg["max_new_tokens"]
+            model, tokenizer, batch_prompts, eval_cfg.get("max_new_tokens", 256)
         )
         predictions.extend(batch_preds)
 
-    # Save examples to JSON
+    # Save examples
     if eval_cfg.get("log_examples", True):
         num_examples = eval_cfg.get("num_examples_to_log", 100)
-        examples_path = f"{output_dir}/part-{part}-examples.json"
-        save_examples(
-            sources, predictions, references, examples_path, num_examples, config, part
-        )
+        examples_path = f"{output_dir}/eval_examples.json"
+        save_examples(sources, predictions, references, examples_path, num_examples)
 
-    # BLEU
+    # Compute metrics
+    print("\nComputing BLEU...")
     bleu = corpus_bleu(predictions, [references])
 
-    # chrF++
+    print("Computing chrF++...")
     chrf = corpus_chrf(predictions, [references], word_order=2)
 
-    # COMET
-    comet_model_path = download_model(eval_cfg["comet_model"])
+    print("Computing COMET...")
+    comet_model_path = download_model(eval_cfg.get("comet_model", "Unbabel/wmt22-comet-da"))
     comet_model = load_from_checkpoint(comet_model_path)
+
+    # Clean sources for COMET (remove language tags)
+    clean_sources = []
+    for s in sources:
+        if s.startswith("[EN]"):
+            clean_sources.append(s[4:].strip())
+        elif s.startswith("[VI]"):
+            clean_sources.append(s[4:].strip())
+        else:
+            clean_sources.append(s)
+
     comet_data = [
         {"src": s, "mt": p, "ref": r}
-        for s, p, r in zip(sources, predictions, references)
+        for s, p, r in zip(clean_sources, predictions, references)
     ]
     comet_score = comet_model.predict(
         comet_data,
-        batch_size=eval_cfg["comet_batch_size"],
+        batch_size=eval_cfg.get("comet_batch_size", 32),
         gpus=1,
     ).system_score
 
@@ -258,41 +289,59 @@ def evaluate(
         "bleu": bleu.score,
         "chrf++": chrf.score,
         "comet": comet_score,
+        "perplexity": perplexity,
     }
+
+    print("\n" + "=" * 50)
+    print("Evaluation Results:")
+    print(f"  BLEU:       {results['bleu']:.2f}")
+    print(f"  chrF++:     {results['chrf++']:.2f}")
+    print(f"  COMET:      {results['comet']:.4f}")
+    print(f"  Perplexity: {results['perplexity']:.2f}")
+    print("=" * 50)
 
     return results
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Qwen Finetuning Evaluator")
+    parser = argparse.ArgumentParser(description="Qwen Translation Evaluator")
     parser.add_argument(
-        "--config", type=str, default="config.yaml", help="Path to config YAML file"
+        "--config",
+        type=str,
+        default="config.yaml",
+        help="Path to config YAML file",
     )
     parser.add_argument(
-        "--adapter_model_path", type=str, required=True, help="Path to adapter model"
+        "--adapter_model_path",
+        type=str,
+        required=True,
+        help="Path to adapter model",
     )
     parser.add_argument(
-        "--test_data_path", type=str, required=True, help="Path to test data"
+        "--output_dir",
+        type=str,
+        default="outputs",
+        help="Output directory for examples",
     )
     parser.add_argument(
-        "--part", type=int, required=True, help="Curriculum part number"
-    )
-    parser.add_argument(
-        "--output_dir", type=str, default="outputs", help="Output directory for examples"
+        "--test_split",
+        type=str,
+        default="test",
+        help="Test split name (default: test)",
     )
     args = parser.parse_args()
 
     config = load_config(args.config)
+    os.makedirs(args.output_dir, exist_ok=True)
 
     results = evaluate(
         config=config,
         adapter_model_path=args.adapter_model_path,
-        test_data_path=args.test_data_path,
-        part=args.part,
         output_dir=args.output_dir,
+        test_split=args.test_split,
     )
 
-    # Output JSON for orchestrator to parse
+    # Output JSON for scripting
     print(json.dumps(results))
 
 

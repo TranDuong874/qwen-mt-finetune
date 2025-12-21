@@ -1,0 +1,58 @@
+# Sanity check config - very small for quick testing on RTX 3060
+experiment_name: "sanity-check"
+
+# Model
+base_model: "Qwen/Qwen2.5-0.5B"  # Smaller model for testing
+adapter_path: null
+
+# LoRA Configuration
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.0
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+
+# Quantization (QLoRA)
+quantization:
+  load_in_4bit: true
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_compute_dtype: "bfloat16"
+  bnb_4bit_use_double_quant: true
+
+# Dataset - pull from HuggingFace (use local_dir for local testing)
+dataset:
+  hf_repo: "TranDuong/medical-vlsp-2025"
+  # local_dir: "cleaned_data"  # Uncomment for local testing
+  max_samples: 5  # Only 5 samples for quick test
+
+# Training - minimal for testing
+training:
+  max_steps: 4
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 1
+  learning_rate: 2.0e-4
+  warmup_ratio: 0.0
+  max_seq_length: 128
+  fp16: false
+  bf16: true
+  gradient_checkpointing: true
+  scheduler: "cosine"
+  logging_steps: 1
+  eval_steps: 2
+  save_steps: 2
+  save_total_limit: 1
+
+# W&B - disabled for sanity check
+wandb:
+  enabled: false
+
+# HuggingFace Hub - disabled for sanity check
+huggingface:
+  push_best_model: false
+
+# Output
+output_dir: "outputs_sanity"

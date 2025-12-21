@@ -1,157 +1,200 @@
-# Qwen Medical Translation Finetuning
+# Qwen Medical Translation CPT
 
-QLoRA finetuning pipeline for Qwen models on Vietnamese-English medical translation with curriculum learning.
+Continuous Pre-Training (CPT) pipeline for Qwen models on Vietnamese-English medical translation with QLoRA.
 
 ## Features
 
-- **Curriculum Learning**: 10-stage progressive training (100K samples per stage)
-- **QLoRA**: 4-bit quantization with LoRA adapters (~70MB per checkpoint)
-- **Multi-GPU**: Distributed training with Accelerate
-- **Early Stopping**: Stops training when BLEU stops improving
-- **W&B Logging**: Separate training runs + unified eval run with line charts
-- **HuggingFace Push**: Auto-upload best model to HF Hub
+- **Streaming Data**: Loads data directly from HuggingFace Hub (no local storage needed)
+- **Bidirectional Translation**: EN→VI (`[VI]` prefix) and VI→EN (`[EN]` prefix)
+- **QLoRA**: 4-bit quantization with LoRA adapters
+- **Proper Masking**: Loss computed only on target tokens
+- **Auto HF Push**: Pushes best model to HuggingFace Hub on eval improvement
+- **Metrics**: Perplexity, BLEU, chrF++, COMET
 
 ## Project Structure
 
 ```
 qwen-mt-finetune/
-├── config.yaml          # All experiment settings
-├── orchestrator.py      # Main pipeline controller
-├── train.py             # Training script (per stage)
-├── evaluate.py          # Evaluation with BLEU/chrF++/COMET
-├── .env                 # API keys (HF_TOKEN, WANDB_API_KEY)
-└── outputs/             # Checkpoints and results
+├── train_cpt.py         # Main training script
+├── evaluate.py          # Evaluation with all metrics
+├── config.yaml          # Production config
+├── config_sanity.yaml   # Quick sanity check config
+├── requirements.txt     # Dependencies
+└── .env                 # API keys (create this)
 ```
 
-## Setup
+## Quick Start (Vast.ai)
+
+### 1. Create Instance
+
+On [Vast.ai](https://vast.ai/), select:
+- **GPU**: RTX 4090 / A100 / H100 (24GB+ VRAM recommended)
+- **Image**: `pytorch/pytorch:2.1.0-cuda12.1-cudnn8-devel` or similar
+- **Disk**: 50GB+ (for model weights)
+
+### 2. SSH & Clone
 
 ```bash
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate
+ssh -p PORT root@HOST
 
-# Install dependencies
-pip install torch transformers peft accelerate bitsandbytes
-pip install datasets wandb sacrebleu comet-ml huggingface_hub
-pip install python-dotenv pyyaml tqdm
+# Clone repo
+git clone https://github.com/YOUR_USERNAME/qwen-mt-finetune.git
+cd qwen-mt-finetune
+```
 
-# Configure API keys in .env
-HUGGING_FACE_TOKEN=hf_xxx
-WANDB_API_KEY=xxx
+### 3. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Configure Environment
+
+Create `.env` file with your API keys:
+
+```bash
+cat > .env << 'EOF'
+HUGGING_FACE_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx
+WANDB_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+EOF
+```
+
+Get tokens from:
+- HuggingFace: https://huggingface.co/settings/tokens
+- W&B: https://wandb.ai/authorize
+
+### 5. Run Training
+
+```bash
+# Sanity check first (5 samples, ~1 min)
+python train_cpt.py --config config_sanity.yaml
+
+# Full training
+python train_cpt.py --config config.yaml
+```
+
+### 6. Run Evaluation
+
+```bash
+python evaluate.py \
+    --adapter_model_path outputs/best_model \
+    --output_dir outputs \
+    --test_split test
 ```
 
 ## Configuration
 
-Edit `config.yaml` to customize:
+### config.yaml (Production)
 
 ```yaml
-# Key settings
-experiment_name: "qwen-medical-mt"
-base_model: "Qwen/Qwen3-1.7B"
+experiment_name: "qwen-cpt-medical-mt"
+base_model: "Qwen/Qwen2.5-3B"
 
-# Training
-training:
-  num_gpus: 2
-  per_device_batch_size: 1
-  learning_rate: 1.0e-4
-  num_epochs: 1
-
-# Dataset
 dataset:
-  num_parts: 10
-  max_train_samples: null  # null = full, int = limit
+  hf_repo: "TranDuong/medical-vlsp-2025"
 
-# Early stopping
-early_stopping:
-  patience: 2
-  min_delta: 0.5
+training:
+  max_steps: 20000
+  per_device_batch_size: 16
+  gradient_accumulation_steps: 2
+  learning_rate: 2.0e-4
+  eval_steps: 500
+  save_steps: 500
 
-# HuggingFace
 huggingface:
   push_best_model: true
-  repo_id: "YourUsername/model-name"
+  repo_id: "TranDuong/qwen-medical-mt-cpt"
   private: true
 ```
 
-## Usage
+### Key Settings
 
-### Full Training Run
+| Setting | Description | Recommended |
+|---------|-------------|-------------|
+| `base_model` | Qwen model to finetune | `Qwen/Qwen2.5-3B` |
+| `max_steps` | Total training steps | 20000-50000 |
+| `per_device_batch_size` | Batch size per GPU | 8-16 (24GB VRAM) |
+| `gradient_accumulation_steps` | Effective batch multiplier | 2-4 |
+| `eval_steps` | Evaluate every N steps | 500-1000 |
+| `max_samples` | Limit samples (for testing) | `null` for full |
 
-```bash
-source .venv/bin/activate
-python orchestrator.py --config config.yaml
+## Data Format
+
+The dataset uses CSV with `src` and `tgt` columns:
+
+```csv
+src,tgt
+"[VI] English text here","Vietnamese translation"
+"[EN] Vietnamese text here","English translation"
 ```
 
-### Smoke Test (quick validation)
+- `[VI]` prefix = translate to Vietnamese
+- `[EN]` prefix = translate to English
 
-Edit `config.yaml`:
-```yaml
-dataset:
-  num_parts: 2
-  max_train_samples: 10
-  max_test_samples: 10
-training:
-  save_steps: 5
-  eval_steps: 5
-```
+## Monitoring
 
-Then run:
-```bash
-python orchestrator.py --config config.yaml
-```
+### W&B Dashboard
 
-## W&B Dashboard
+Training logs to Weights & Biases:
+- Loss curves
+- Eval loss / perplexity
+- Learning rate schedule
 
-Training creates grouped runs under your experiment name:
+### HuggingFace Hub
 
-| Run | Type | Metrics |
-|-----|------|---------|
-| `{name}-part1` | train | Loss graph for stage 1 |
-| `{name}-part2` | train | Loss graph for stage 2 |
-| ... | ... | ... |
-| `{name}-eval` | eval | BLEU/COMET/chrF++ line charts across all stages |
-
-All runs are grouped together for easy comparison.
+Best model is automatically pushed to:
+`https://huggingface.co/TranDuong/qwen-medical-mt-cpt`
 
 ## Output Structure
 
 ```
 outputs/
-├── {name}-part1/
-│   └── best_model/          # LoRA adapter + tokenizer
-├── {name}-part2/
-│   └── best_model/
-├── part-1-examples.json     # 100 random translation samples
-├── part-2-examples.json
-└── progress.json            # Training history & best checkpoint
+├── checkpoint-500/      # Intermediate checkpoints
+├── checkpoint-1000/
+├── best_model/          # Best model (lowest eval_loss)
+│   ├── adapter_config.json
+│   ├── adapter_model.safetensors
+│   └── tokenizer files
+└── final_model/         # Final model after training
+```
+
+## Troubleshooting
+
+### CUDA OOM
+
+Reduce batch size or enable more aggressive gradient checkpointing:
+
+```yaml
+training:
+  per_device_batch_size: 4
+  gradient_accumulation_steps: 4
+  gradient_checkpointing: true
+```
+
+### Slow Data Loading
+
+The first epoch may be slow due to HuggingFace dataset caching. Subsequent epochs will be faster.
+
+### Authentication Error
+
+Make sure `.env` has valid tokens:
+
+```bash
+# Test HuggingFace auth
+python -c "from huggingface_hub import HfApi; HfApi().whoami()"
+
+# Test dataset access
+python -c "from datasets import load_dataset; import os; from dotenv import load_dotenv; load_dotenv(); ds = load_dataset('TranDuong/medical-vlsp-2025', data_files={'train': 'cleaned_data/train.csv'}, split='train', streaming=True, token=os.getenv('HUGGING_FACE_TOKEN')); print(next(iter(ds)))"
 ```
 
 ## Metrics
 
-- **BLEU**: SacreBLEU corpus-level score
-- **chrF++**: Character n-gram F-score with word order
-- **COMET**: Neural reference-based metric (Unbabel/wmt22-comet-da)
-
-## Pipeline Flow
-
-```
-Stage 1: Base Model → Train → Eval → Save Adapter
-                                ↓
-Stage 2: Load Stage 1 Adapter → Train → Eval → Save Adapter
-                                ↓
-Stage 3: Load Stage 2 Adapter → Train → Eval → Save Adapter
-                                ↓
-         ... (continues until early stopping or 10 stages)
-                                ↓
-         Push Best Model to HuggingFace
-```
-
-## Dataset Format
-
-```
-[EN] English text here [VI] Vietnamese translation here
-[EN] Another sentence [VI] Another translation
-```
+| Metric | Description |
+|--------|-------------|
+| **Perplexity** | Lower = better language modeling |
+| **BLEU** | N-gram precision (0-100) |
+| **chrF++** | Character n-gram F-score with word order |
+| **COMET** | Neural metric (-1 to 1, higher = better) |
 
 ## License
 

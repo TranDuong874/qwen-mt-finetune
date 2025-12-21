@@ -1,4 +1,24 @@
+# Environment
 *.env
+.env
+
+# Data
 dataset/*
+cleaned_data/
+
+# Outputs
 wandb/
 outputs/
+outputs_sanity/
+
+# Claude conversation
+CLAUDE.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# IDE
+.vscode/
+.idea/
