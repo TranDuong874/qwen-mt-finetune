@@ -32,7 +32,7 @@ dataset:
 
 # Training
 training:
-  max_steps: 42000
+  num_epochs: 1
   per_device_batch_size: 8
   gradient_accumulation_steps: 4
   learning_rate: 2.0e-4

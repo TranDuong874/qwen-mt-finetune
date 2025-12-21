@@ -353,7 +353,7 @@ def train(config: dict):
         per_device_eval_batch_size=train_cfg.get("per_device_batch_size", 8),
         gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 1),
         # Training duration
-        max_steps=train_cfg.get("max_steps", 10000),
+        num_train_epochs=train_cfg.get("num_epochs", 3),
         # Learning rate
         learning_rate=train_cfg.get("learning_rate", 2e-4),
         lr_scheduler_type=train_cfg.get("scheduler", "cosine"),
