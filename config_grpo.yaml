@@ -3,8 +3,8 @@
 experiment_name: qwen-medical-grpo
 
 # Base model and adapter
-base_model: Qwen/Qwen2.5-0.5B
-adapter_path: TranDuong/qwen-medical-mt-grpo  # CPT adapter to fine-tune with GRPO
+base_model: Qwen/Qwen2.5-3B
+adapter_path: TranDuong/qwen-medical-mt-cpt  # CPT adapter to fine-tune with GRPO
 
 # Output
 output_dir: outputs_grpo

@@ -366,7 +366,7 @@ class GRPODataset(Dataset):
         else:
             self.dataset = load_dataset(
                 hf_repo,
-                data_files={split: "dataset/grpo_gold/gold_3k.csv"},
+                data_files={split: "grpo_dataset.csv"},
                 split=split,
                 token=os.getenv("HUGGING_FACE_TOKEN"),
             )
@@ -457,42 +457,34 @@ def generate_responses(
     """
     Generate multiple responses per prompt for GRPO.
     Returns: list of lists, each inner list contains num_generations responses.
-
-    Uses batched generation: repeats inputs num_generations times for single forward pass.
     """
     batch_size = input_ids.shape[0]
-
-    # Repeat inputs for batched generation: [B, L] -> [B * num_gen, L]
-    expanded_input_ids = input_ids.repeat_interleave(num_generations, dim=0)
-    expanded_attention_mask = attention_mask.repeat_interleave(num_generations, dim=0)
-
-    with torch.no_grad():
-        outputs = model.generate(
-            input_ids=expanded_input_ids,
-            attention_mask=expanded_attention_mask,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-
-    # Decode and reshape: [B * num_gen] -> [B, num_gen]
-    input_len = input_ids.shape[1]
     all_responses = [[] for _ in range(batch_size)]
 
-    for i, output in enumerate(outputs):
-        generated = output[input_len:]
-        text = tokenizer.decode(generated, skip_special_tokens=True).strip()
-        # Clean language tags from output
-        if text.startswith("[VI] "):
-            text = text[5:]
-        elif text.startswith("[EN] "):
-            text = text[5:]
-        # Map back to original batch index
-        batch_idx = i // num_generations
-        all_responses[batch_idx].append(text)
+    for _ in range(num_generations):
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+
+        # Decode only new tokens
+        input_len = input_ids.shape[1]
+        for i, output in enumerate(outputs):
+            generated = output[input_len:]
+            text = tokenizer.decode(generated, skip_special_tokens=True).strip()
+            # Clean language tags from output
+            if text.startswith("[VI] "):
+                text = text[5:]
+            elif text.startswith("[EN] "):
+                text = text[5:]
+            all_responses[i].append(text)
 
     return all_responses
 
@@ -699,7 +691,7 @@ def train(config: dict):
     # Optimizer
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
-        lr=train_cfg.get("learning_rate", 5e-7),
+        lr=float(train_cfg.get("learning_rate", 5e-7)),
         weight_decay=0.01,
     )
 
