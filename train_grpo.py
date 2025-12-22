@@ -772,19 +772,23 @@ def train(config: dict):
         for batch in progress_bar:
             t_start = time.time()
 
-            # Generate responses
+            # Generate responses (disable grad checkpointing for fast KV cache)
+            unwrapped = accelerator.unwrap_model(model)
+            unwrapped.gradient_checkpointing_disable()
             model.eval()
-            responses = generate_responses(
-                accelerator.unwrap_model(model),
-                tokenizer,
-                batch["input_ids"],
-                batch["attention_mask"],
-                num_generations=num_generations,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-            )
+            with torch.no_grad():
+                responses = generate_responses(
+                    unwrapped,
+                    tokenizer,
+                    batch["input_ids"],
+                    batch["attention_mask"],
+                    num_generations=num_generations,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                )
             model.train()
+            unwrapped.gradient_checkpointing_enable()
             t_gen = time.time()
 
             # Flatten all responses for batched reward computation
