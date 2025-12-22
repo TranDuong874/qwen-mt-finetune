@@ -14,11 +14,11 @@ Usage:
 import argparse
 import gc
 import os
-import re
 
 import pandas as pd
 import torch
 from comet import download_model, load_from_checkpoint
+from datasets import load_dataset
 from dotenv import load_dotenv
 from peft import PeftModel
 from tqdm import tqdm
@@ -199,10 +199,10 @@ def bin_by_comet(df: pd.DataFrame, output_dir: str):
 def main():
     parser = argparse.ArgumentParser(description="Sample gold set for GRPO")
     parser.add_argument(
-        "--train_csv",
+        "--hf_repo",
         type=str,
-        default="cleaned_data/train.csv",
-        help="Path to train.csv",
+        default="TranDuong/medical-vlsp-2025",
+        help="HuggingFace dataset repo",
     )
     parser.add_argument(
         "--sample_size",
@@ -253,9 +253,15 @@ def main():
         print(f"Loading existing scored data from {scored_path}")
         df = pd.read_csv(scored_path)
     else:
-        # Load and sample training data
-        print(f"Loading training data from {args.train_csv}")
-        train_df = pd.read_csv(args.train_csv)
+        # Load from HuggingFace
+        print(f"Loading training data from HuggingFace: {args.hf_repo}")
+        dataset = load_dataset(
+            args.hf_repo,
+            data_files={"train": "cleaned_data/train.csv"},
+            split="train",
+            token=os.getenv("HUGGING_FACE_TOKEN"),
+        )
+        train_df = dataset.to_pandas()
         print(f"Total training samples: {len(train_df)}")
 
         # Stratified sampling by language tag
