@@ -71,7 +71,11 @@ python train_cpt.py --config config_sanity.yaml
 
 # Full training
 python train_cpt.py --config config.yaml
+
+accelerate launch --num_processes=2 train_cpt.py --config config.yaml
 ```
+
+
 
 ### 6. Run Evaluation
 

@@ -5,7 +5,7 @@ Supports streaming data, proper masking, evaluation, and HuggingFace Hub integra
 import argparse
 import math
 import os
-from typing import Dict, Iterator
+from typing import Dict
 
 import torch
 import wandb
@@ -14,7 +14,7 @@ from datasets import load_dataset
 from dotenv import load_dotenv
 from huggingface_hub import HfApi
 from peft import LoraConfig, PeftModel, get_peft_model
-from torch.utils.data import IterableDataset
+from torch.utils.data import Dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -33,9 +33,9 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
-class TranslationDataset(IterableDataset):
+class TranslationDataset(Dataset):
     """
-    Streaming dataset for translation with proper masking.
+    Map-style dataset for translation with proper masking.
     Masks source text + language token, computes loss only on target.
     Supports both HuggingFace repos and local CSV files.
     """
@@ -52,10 +52,8 @@ class TranslationDataset(IterableDataset):
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.seed = seed
-        self.max_samples = max_samples
 
-        # Load dataset - either from HF or local CSV (no streaming for speed)
+        # Load dataset - either from HF or local CSV
         if local_path:
             self.dataset = load_dataset(
                 "csv",
@@ -79,15 +77,15 @@ class TranslationDataset(IterableDataset):
         if split == "train":
             self.dataset = self.dataset.shuffle(seed=seed)
 
-    def __iter__(self) -> Iterator[Dict]:
-        count = 0
-        for example in self.dataset:
-            if self.max_samples and count >= self.max_samples:
-                break
-            tokenized = self._tokenize(example)
-            if tokenized is not None:
-                count += 1
-                yield tokenized
+        if max_samples:
+            self.dataset = self.dataset.select(range(min(max_samples, len(self.dataset))))
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx) -> Dict:
+        example = self.dataset[idx]
+        return self._tokenize(example)
 
     def _tokenize(self, example: Dict) -> Dict:
         """Tokenize and create masked labels."""
@@ -95,7 +93,12 @@ class TranslationDataset(IterableDataset):
         tgt = str(example.get("tgt", "")).strip()
 
         if not src or not tgt:
-            return None
+            # Return dummy data for invalid examples
+            return {
+                "input_ids": [self.tokenizer.pad_token_id],
+                "attention_mask": [0],
+                "labels": [-100],
+            }
 
         # Tokenize source (includes [EN]/[VI] token) and target separately
         source_ids = self.tokenizer(
@@ -377,7 +380,8 @@ def train(config: dict):
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", True),
         report_to="wandb" if use_wandb else "none",
         remove_unused_columns=False,
-        dataloader_pin_memory=False,
+        dataloader_pin_memory=True,
+        dataloader_num_workers=train_cfg.get("dataloader_num_workers", 4),
     )
 
     # Callbacks

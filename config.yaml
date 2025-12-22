@@ -42,6 +42,7 @@ training:
   bf16: true
   gradient_checkpointing: true
   scheduler: "cosine"
+  dataloader_num_workers: 4  # Speed up data loading
   # Logging & Evaluation
   logging_steps: 50
   eval_steps: 500
