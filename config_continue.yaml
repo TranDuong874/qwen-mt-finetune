@@ -1,0 +1,71 @@
+# Continuation training from best_model checkpoint
+experiment_name: "qwen-cpt-medical-mt-continue"
+
+# Model
+base_model: "Qwen/Qwen2.5-3B"
+adapter_path: "outputs/best_model"  # Load from checkpoint
+
+# LoRA Configuration (must match original)
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.0
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+# Quantization
+quantization:
+  load_in_4bit: false
+
+# Dataset
+dataset:
+  hf_repo: "TranDuong/medical-vlsp-2025"
+
+# Training - continuation settings
+# Calculate max_steps for 0.5 epoch:
+#   steps_per_epoch = num_samples / (batch_size * grad_accum * num_gpus)
+#   Example: 670000 / (8 * 4 * 2) = ~10468 steps/epoch
+#   0.5 epoch = ~5234 steps
+training:
+  max_steps: 5234  # ~0.5 epoch (adjust based on your GPU count)
+  num_epochs: 1    # Fallback, max_steps takes priority
+  per_device_batch_size: 8
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-5  # Lower LR for continuation (was 2e-4)
+  warmup_ratio: 0.01     # Shorter warmup
+  max_seq_length: 512
+  bf16: true
+  gradient_checkpointing: true
+  scheduler: "linear"    # Linear decay
+  dataloader_num_workers: 4
+  logging_steps: 50
+  eval_steps: 500
+  save_steps: 500
+
+# Evaluation
+evaluation:
+  max_new_tokens: 256
+  generation_batch_size: 128
+  comet_model: "Unbabel/wmt22-comet-da"
+  comet_batch_size: 32
+  log_examples: true
+
+# W&B
+wandb:
+  project: "qwen-mt-cpt"
+  enabled: true
+
+# HuggingFace Hub
+huggingface:
+  push_best_model: true
+  repo_id: "TranDuong/qwen-medical-mt-cpt"
+  private: true
+
+# Output
+output_dir: "outputs"

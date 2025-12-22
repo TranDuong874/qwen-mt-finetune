@@ -396,6 +396,12 @@ def train(config: dict):
     num_epochs = train_cfg.get("num_epochs", 3)
     num_update_steps_per_epoch = len(train_dataloader) // accelerator.gradient_accumulation_steps
     max_train_steps = num_epochs * num_update_steps_per_epoch
+
+    # Override with max_steps if specified (for fractional epochs)
+    if train_cfg.get("max_steps"):
+        max_train_steps = train_cfg["max_steps"]
+        num_epochs = math.ceil(max_train_steps / num_update_steps_per_epoch)
+
     warmup_steps = int(max_train_steps * train_cfg.get("warmup_ratio", 0.03))
 
     # Scheduler
@@ -456,6 +462,10 @@ def train(config: dict):
             if accelerator.sync_gradients:
                 global_step += 1
                 total_loss += loss.detach().float()
+
+                # Early stop if max_steps reached
+                if global_step >= max_train_steps:
+                    break
 
                 # Logging
                 if global_step % logging_steps == 0:
@@ -530,6 +540,10 @@ def train(config: dict):
                         unwrapped_model.save_pretrained(save_path)
                         tokenizer.save_pretrained(save_path)
                         accelerator.print(f"Saved checkpoint to {save_path}")
+
+        # Break epoch loop if max_steps reached
+        if global_step >= max_train_steps:
+            break
 
     # Final evaluation
     accelerator.print("\nRunning final evaluation...")
