@@ -53,7 +53,7 @@ training:
 # Evaluation (for evaluate.py)
 evaluation:
   max_new_tokens: 256
-  generation_batch_size: 32
+  generation_batch_size: 128
   comet_model: "Unbabel/wmt22-comet-da"
   comet_batch_size: 32
   log_examples: true
