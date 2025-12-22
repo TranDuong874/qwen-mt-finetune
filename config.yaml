@@ -33,8 +33,8 @@ dataset:
 # Training
 training:
   num_epochs: 1
-  per_device_batch_size: 8
-  gradient_accumulation_steps: 4
+  per_device_batch_size: 16
+  gradient_accumulation_steps: 1
   learning_rate: 2.0e-4
   warmup_ratio: 0.03
   max_seq_length: 512
@@ -51,9 +51,9 @@ training:
 
 # Evaluation (for evaluate.py)
 evaluation:
-  max_samples: 10000  # Set high to evaluate all test samples
+  max_samples: 10000
   max_new_tokens: 256
-  generation_batch_size: 32
+  generation_batch_size: 128
   comet_model: "Unbabel/wmt22-comet-da"
   comet_batch_size: 32
   log_examples: true
