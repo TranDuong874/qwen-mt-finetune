@@ -52,8 +52,11 @@ def batch_generate(model, tokenizer, prompts: list, max_new_tokens: int) -> list
         )
 
     predictions = []
+    # With left-padding, the input tokens are at the END of the padded sequence
+    # So generated tokens start after the full padded input length
+    input_len = inputs["input_ids"].shape[1]
+
     for i, output in enumerate(outputs):
-        input_len = inputs["attention_mask"][i].sum().item()
         generated = output[input_len:]
         text = tokenizer.decode(generated, skip_special_tokens=True)
         text = clean_prediction(text)
@@ -66,7 +69,7 @@ def clean_prediction(text: str) -> str:
     """Clean prediction to extract only the target translation."""
     text = text.strip()
 
-    # Remove language tags
+    # Remove language tags if present
     if text.startswith("[VI] "):
         text = text[5:]
     elif text.startswith("[EN] "):
@@ -211,9 +214,7 @@ def evaluate(
         sources.append(src)
         prompts.append(src + " ")
 
-        # Remove language tag from reference
-        if tgt.startswith("[VI] "):
-            tgt = tgt[5:]
+        # Reference is just the target text (no tags expected on tgt)
         references.append(tgt)
 
     print(f"Loaded {len(sources)} test samples")
