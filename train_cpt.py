@@ -18,6 +18,7 @@ from torch.utils.data import Dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    BitsAndBytesConfig,
     Trainer,
     TrainerCallback,
     TrainingArguments,
@@ -245,11 +246,22 @@ def train(config: dict):
     """Main training function."""
     use_wandb = setup_wandb(config)
 
-    # Load base model (no quantization for multi-GPU training)
+    # Quantization config
+    quant_cfg = config.get("quantization", {})
+    compute_dtype = getattr(torch, quant_cfg.get("bnb_4bit_compute_dtype", "bfloat16"))
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=quant_cfg.get("load_in_4bit", True),
+        bnb_4bit_quant_type=quant_cfg.get("bnb_4bit_quant_type", "nf4"),
+        bnb_4bit_compute_dtype=compute_dtype,
+        bnb_4bit_use_double_quant=quant_cfg.get("bnb_4bit_use_double_quant", True),
+    )
+
+    # Load base model
     print(f"Loading base model: {config['base_model']}")
     base_model = AutoModelForCausalLM.from_pretrained(
         config["base_model"],
-        torch_dtype=torch.bfloat16,
+        quantization_config=bnb_config,
+        device_map="auto",
         trust_remote_code=True,
     )
 
@@ -296,10 +308,6 @@ def train(config: dict):
     max_samples = dataset_cfg.get("max_samples")  # For sanity checking
     train_cfg = config.get("training", {})
     max_length = train_cfg.get("max_seq_length", 512)
-
-    # Enable gradient checkpointing with non-reentrant mode for DDP compatibility
-    if train_cfg.get("gradient_checkpointing", True):
-        base_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
     # Create streaming datasets
     if local_dir:
@@ -369,7 +377,7 @@ def train(config: dict):
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         # Other
-        gradient_checkpointing=False,  # Manually enabled above with use_reentrant=False
+        gradient_checkpointing=train_cfg.get("gradient_checkpointing", True),
         report_to="wandb" if use_wandb else "none",
         remove_unused_columns=False,
         dataloader_pin_memory=True,

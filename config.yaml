@@ -19,7 +19,14 @@ lora:
     - "up_proj"
     - "down_proj"
 
-# Dataset
+# Quantization (QLoRA)
+quantization:
+  load_in_4bit: true
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_compute_dtype: "bfloat16"
+  bnb_4bit_use_double_quant: true
+
+# Dataset (streaming from HuggingFace)
 dataset:
   hf_repo: "TranDuong/medical-vlsp-2025"
 
@@ -44,9 +51,8 @@ training:
 
 # Evaluation (for evaluate.py)
 evaluation:
-  max_samples: 10000
   max_new_tokens: 256
-  generation_batch_size: 128
+  generation_batch_size: 32
   comet_model: "Unbabel/wmt22-comet-da"
   comet_batch_size: 32
   log_examples: true
