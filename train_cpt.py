@@ -297,6 +297,10 @@ def train(config: dict):
     train_cfg = config.get("training", {})
     max_length = train_cfg.get("max_seq_length", 512)
 
+    # Enable gradient checkpointing with non-reentrant mode for DDP compatibility
+    if train_cfg.get("gradient_checkpointing", True):
+        base_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
     # Create streaming datasets
     if local_dir:
         print(f"Loading dataset from local: {local_dir}")
@@ -365,7 +369,7 @@ def train(config: dict):
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         # Other
-        gradient_checkpointing=train_cfg.get("gradient_checkpointing", True),
+        gradient_checkpointing=False,  # Manually enabled above with use_reentrant=False
         report_to="wandb" if use_wandb else "none",
         remove_unused_columns=False,
         dataloader_pin_memory=True,
