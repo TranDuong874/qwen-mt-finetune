@@ -254,7 +254,7 @@ def evaluate(
 
     comet_data = [
         {
-            "src": s[5:] if s.startswith("[EN] ") else s,
+            "src": s[5:] if s.startswith("[EN] ") or s.startswith("[VI] ") else s,
             "mt": p,
             "ref": r
         }
