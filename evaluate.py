@@ -64,105 +64,13 @@ def batch_generate(model, tokenizer, prompts: list, max_new_tokens: int) -> list
 
 def clean_prediction(text: str) -> str:
     """Clean prediction to extract only the target translation."""
-    import re
-    import unicodedata
+    text = text.strip()
 
-    def has_vietnamese(s: str) -> bool:
-        """Check if string contains Vietnamese characters."""
-        vietnamese_chars = set('àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ')
-        vietnamese_chars.update('ÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ')
-        return any(c in vietnamese_chars for c in s.lower())
-
-    # Remove any leading "]" character (model sometimes outputs this)
-    text = text.lstrip(']').strip()
-
-    # Remove language tags if present
-    # New format: model should generate [VI] Vietnamese text
-    if "[VI] " in text:
-        # Extract everything after the last [VI] tag
-        text = text.split("[VI]")[-1].strip()
-    elif text.startswith("[VI]"):
-        text = text[4:].strip()
-
-    # If model hallucinated and included [EN] tag, remove it
-    if "[EN]" in text:
-        # If both tags present, take content after [VI]
-        if "[VI]" in text:
-            vi_pos = text.rfind("[VI]")
-            en_pos = text.rfind("[EN]")
-            if vi_pos > en_pos:
-                text = text.split("[VI]")[-1].strip()
-        else:
-            # Only [EN] present, skip it
-            text = text.split("[EN]")[-1].strip()
-
-    # Try to detect if source was copied before translation
-    # Split by sentences and find where Vietnamese text starts
-    if has_vietnamese(text):
-        # For EN->VI: Find first Vietnamese sentence
-        sentences = re.split(r'[.!?]\s+', text)
-        vi_start_idx = -1
-        for i, sent in enumerate(sentences):
-            if has_vietnamese(sent):
-                vi_start_idx = i
-                break
-
-        if vi_start_idx > 0:
-            # Found Vietnamese after some English sentences
-            # Extract from first Vietnamese sentence onwards
-            text = '. '.join(sentences[vi_start_idx:])
-            # Remove leading punctuation/spaces
-            text = text.lstrip('.,!? ').strip()
-
-        # Always try word-level detection if we have only 1 sentence or the first sentence has both EN and VI
-        if len(sentences) == 1 or (vi_start_idx == 0 and len(sentences[0].split()) > 10):
-            # Check if there's English before Vietnamese within the sentence
-            words = text.split()
-            has_english_before_vi = False
-            for i in range(min(5, len(words))):  # Check first few words
-                if not has_vietnamese(words[i]) and len(words[i]) > 2:
-                    has_english_before_vi = True
-                    break
-
-            if has_english_before_vi:
-                # Find first word that has Vietnamese characters
-                for i in range(len(words)):
-                    if has_vietnamese(words[i]):
-                        # Extract from this position onwards
-                        text = ' '.join(words[i:])
-                        break
-    else:
-        # For VI->EN: Find first English sentence after Vietnamese
-        # Split and look for transition from Vietnamese to English
-        sentences = re.split(r'[.!?]\s+', text)
-        en_start_idx = -1
-        prev_had_vi = False
-        for i, sent in enumerate(sentences):
-            curr_has_vi = has_vietnamese(sent)
-            if prev_had_vi and not curr_has_vi and len(sent.strip()) > 10:
-                en_start_idx = i
-                break
-            prev_had_vi = curr_has_vi
-
-        if en_start_idx > 0:
-            text = '. '.join(sentences[en_start_idx:])
-            text = text.lstrip('.,!? ').strip()
-        elif en_start_idx == -1 and any(has_vietnamese(s) for s in sentences):
-            # Try word-level detection for VI->EN case
-            words = text.split()
-            found_vi = False
-            for i in range(len(words)):
-                chunk = ' '.join(words[max(0, i-2):i+1])
-                if found_vi and not has_vietnamese(words[i]) and len(words[i]) > 3:
-                    # Transitioned from VI to EN
-                    text = ' '.join(words[i:])
-                    break
-                if has_vietnamese(chunk):
-                    found_vi = True
-
-    # Remove trailing repeated dots/numbers
-    text = re.sub(r'(\d+\.\s*){3,}.*$', '', text)
-    text = re.sub(r'[\s\d\.]+$', '', text)
+    # Remove language tags
+    if text.startswith("[VI] "):
+        text = text[5:]
+    elif text.startswith("[EN] "):
+        text = text[5:]
 
     return text.strip()
 
@@ -173,7 +81,7 @@ def compute_perplexity(model, tokenizer, dataset, max_samples: int = 1000) -> fl
     total_loss = 0.0
     total_tokens = 0
 
-    samples = list(dataset.take(max_samples))
+    samples = dataset.select(range(min(max_samples, len(dataset))))
 
     for example in tqdm(samples, desc="Computing perplexity"):
         src = str(example.get("src", "")).strip()
@@ -262,14 +170,15 @@ def evaluate(
     )
 
     print(f"Loading adapter from {adapter_model_path}")
-    hf_token = os.getenv("HUGGING_FACE_TOKEN")
-    print(f"Using HF token: {hf_token[:10]}..." if hf_token else "WARNING: No HF token found!")
-    model = PeftModel.from_pretrained(base_model, adapter_model_path, token=hf_token)
-    # Load tokenizer from base model (same tokenizer, avoids auth issues with private adapter repo)
+    model = PeftModel.from_pretrained(
+        base_model,
+        adapter_model_path,
+        token=os.getenv("HUGGING_FACE_TOKEN")
+    )
     tokenizer = AutoTokenizer.from_pretrained(config["base_model"])
     model.eval()
 
-    # Load test dataset from HuggingFace
+    # Load test dataset
     dataset_cfg = config.get("dataset", {})
     hf_repo = dataset_cfg.get("hf_repo", "TranDuong/medical-vlsp-2025")
 
@@ -283,47 +192,38 @@ def evaluate(
         hf_repo,
         data_files={test_split: split_to_file.get(test_split, f"cleaned_data/{test_split}.csv")},
         split=test_split,
-        streaming=True,
+        streaming=False,
         token=os.getenv("HUGGING_FACE_TOKEN"),
     )
 
-    # Compute perplexity first
+    # Compute perplexity
     print("\nComputing perplexity...")
     perplexity = compute_perplexity(model, tokenizer, test_dataset, max_samples=1000)
     print(f"Perplexity: {perplexity:.2f}")
 
-    # Reload dataset for translation evaluation
-    test_dataset = load_dataset(
-        hf_repo,
-        data_files={test_split: split_to_file.get(test_split, f"cleaned_data/{test_split}.csv")},
-        split=test_split,
-        streaming=True,
-        token=os.getenv("HUGGING_FACE_TOKEN"),
-    )
-
     # Parse test data
+    eval_cfg = config.get("evaluation", {})
+    max_samples = eval_cfg.get("max_samples", 2000)
+
+    test_samples = test_dataset.select(range(min(max_samples, len(test_dataset))))
+
     sources = []
     prompts = []
     references = []
 
-    eval_cfg = config.get("evaluation", {})
-    max_samples = eval_cfg.get("max_samples", 2000)
-
-    for example in tqdm(test_dataset.take(max_samples), desc="Loading test data"):
+    for example in tqdm(test_samples, desc="Loading test data"):
         src = str(example.get("src", "")).strip()
         tgt = str(example.get("tgt", "")).strip()
 
         if not src or not tgt:
             continue
 
-        # src contains [EN] English text
-        # tgt contains [VI] Vietnamese text
         sources.append(src)
-        prompts.append(src + " ")  # Add space for generation
+        prompts.append(src + " ")
 
-        # Remove [VI] tag from reference for metric computation
+        # Remove language tag from reference
         if tgt.startswith("[VI] "):
-            tgt = tgt[5:]  # Remove '[VI] ' prefix
+            tgt = tgt[5:]
         references.append(tgt)
 
     print(f"Loaded {len(sources)} test samples")
@@ -356,18 +256,13 @@ def evaluate(
     comet_model_path = download_model(eval_cfg.get("comet_model", "Unbabel/wmt22-comet-da"))
     comet_model = load_from_checkpoint(comet_model_path)
 
-    # Clean sources for COMET (remove [EN] tag)
-    clean_sources = []
-    for s in sources:
-        if s.startswith("[EN] "):
-            clean_sources.append(s[5:])  # Remove '[EN] ' prefix
-        else:
-            clean_sources.append(s)
-
-    # References already cleaned of [VI] tag during loading
     comet_data = [
-        {"src": s, "mt": p, "ref": r}
-        for s, p, r in zip(clean_sources, predictions, references)
+        {
+            "src": s[5:] if s.startswith("[EN] ") else s,
+            "mt": p,
+            "ref": r
+        }
+        for s, p, r in zip(sources, predictions, references)
     ]
     comet_score = comet_model.predict(
         comet_data,

@@ -258,10 +258,11 @@ def train(config: dict):
 
     # Load base model
     print(f"Loading base model: {config['base_model']}")
+    # Note: When using accelerate launch, we should not use device_map="auto"
+    # Accelerate handles device placement itself
     base_model = AutoModelForCausalLM.from_pretrained(
         config["base_model"],
         quantization_config=bnb_config,
-        device_map="auto",
         trust_remote_code=True,
     )
 
