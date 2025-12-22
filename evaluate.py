@@ -65,19 +65,102 @@ def batch_generate(model, tokenizer, prompts: list, max_new_tokens: int) -> list
 def clean_prediction(text: str) -> str:
     """Clean prediction to extract only the target translation."""
     import re
+    import unicodedata
 
-    if "[VI]" in text and "[EN]" in text:
-        vi_pos = text.rfind("[VI]")
-        en_pos = text.rfind("[EN]")
-        if vi_pos > en_pos:
-            text = text.split("[VI]")[-1].strip()
-        else:
-            text = text.split("[EN]")[-1].strip()
-    elif "[VI]" in text:
+    def has_vietnamese(s: str) -> bool:
+        """Check if string contains Vietnamese characters."""
+        vietnamese_chars = set('àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ')
+        vietnamese_chars.update('ÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ')
+        return any(c in vietnamese_chars for c in s.lower())
+
+    # Remove any leading "]" character (model sometimes outputs this)
+    text = text.lstrip(']').strip()
+
+    # Remove language tags if present
+    # New format: model should generate [VI] Vietnamese text
+    if "[VI] " in text:
+        # Extract everything after the last [VI] tag
         text = text.split("[VI]")[-1].strip()
-    elif "[EN]" in text:
-        text = text.split("[EN]")[-1].strip()
+    elif text.startswith("[VI]"):
+        text = text[4:].strip()
 
+    # If model hallucinated and included [EN] tag, remove it
+    if "[EN]" in text:
+        # If both tags present, take content after [VI]
+        if "[VI]" in text:
+            vi_pos = text.rfind("[VI]")
+            en_pos = text.rfind("[EN]")
+            if vi_pos > en_pos:
+                text = text.split("[VI]")[-1].strip()
+        else:
+            # Only [EN] present, skip it
+            text = text.split("[EN]")[-1].strip()
+
+    # Try to detect if source was copied before translation
+    # Split by sentences and find where Vietnamese text starts
+    if has_vietnamese(text):
+        # For EN->VI: Find first Vietnamese sentence
+        sentences = re.split(r'[.!?]\s+', text)
+        vi_start_idx = -1
+        for i, sent in enumerate(sentences):
+            if has_vietnamese(sent):
+                vi_start_idx = i
+                break
+
+        if vi_start_idx > 0:
+            # Found Vietnamese after some English sentences
+            # Extract from first Vietnamese sentence onwards
+            text = '. '.join(sentences[vi_start_idx:])
+            # Remove leading punctuation/spaces
+            text = text.lstrip('.,!? ').strip()
+
+        # Always try word-level detection if we have only 1 sentence or the first sentence has both EN and VI
+        if len(sentences) == 1 or (vi_start_idx == 0 and len(sentences[0].split()) > 10):
+            # Check if there's English before Vietnamese within the sentence
+            words = text.split()
+            has_english_before_vi = False
+            for i in range(min(5, len(words))):  # Check first few words
+                if not has_vietnamese(words[i]) and len(words[i]) > 2:
+                    has_english_before_vi = True
+                    break
+
+            if has_english_before_vi:
+                # Find first word that has Vietnamese characters
+                for i in range(len(words)):
+                    if has_vietnamese(words[i]):
+                        # Extract from this position onwards
+                        text = ' '.join(words[i:])
+                        break
+    else:
+        # For VI->EN: Find first English sentence after Vietnamese
+        # Split and look for transition from Vietnamese to English
+        sentences = re.split(r'[.!?]\s+', text)
+        en_start_idx = -1
+        prev_had_vi = False
+        for i, sent in enumerate(sentences):
+            curr_has_vi = has_vietnamese(sent)
+            if prev_had_vi and not curr_has_vi and len(sent.strip()) > 10:
+                en_start_idx = i
+                break
+            prev_had_vi = curr_has_vi
+
+        if en_start_idx > 0:
+            text = '. '.join(sentences[en_start_idx:])
+            text = text.lstrip('.,!? ').strip()
+        elif en_start_idx == -1 and any(has_vietnamese(s) for s in sentences):
+            # Try word-level detection for VI->EN case
+            words = text.split()
+            found_vi = False
+            for i in range(len(words)):
+                chunk = ' '.join(words[max(0, i-2):i+1])
+                if found_vi and not has_vietnamese(words[i]) and len(words[i]) > 3:
+                    # Transitioned from VI to EN
+                    text = ' '.join(words[i:])
+                    break
+                if has_vietnamese(chunk):
+                    found_vi = True
+
+    # Remove trailing repeated dots/numbers
     text = re.sub(r'(\d+\.\s*){3,}.*$', '', text)
     text = re.sub(r'[\s\d\.]+$', '', text)
 
@@ -233,9 +316,14 @@ def evaluate(
         if not src or not tgt:
             continue
 
-        # src already contains [EN] or [VI] prefix
+        # src contains [EN] English text
+        # tgt contains [VI] Vietnamese text
         sources.append(src)
         prompts.append(src + " ")  # Add space for generation
+
+        # Remove [VI] tag from reference for metric computation
+        if tgt.startswith("[VI] "):
+            tgt = tgt[5:]  # Remove '[VI] ' prefix
         references.append(tgt)
 
     print(f"Loaded {len(sources)} test samples")
@@ -268,16 +356,15 @@ def evaluate(
     comet_model_path = download_model(eval_cfg.get("comet_model", "Unbabel/wmt22-comet-da"))
     comet_model = load_from_checkpoint(comet_model_path)
 
-    # Clean sources for COMET (remove language tags)
+    # Clean sources for COMET (remove [EN] tag)
     clean_sources = []
     for s in sources:
-        if s.startswith("[EN]"):
-            clean_sources.append(s[4:].strip())
-        elif s.startswith("[VI]"):
-            clean_sources.append(s[4:].strip())
+        if s.startswith("[EN] "):
+            clean_sources.append(s[5:])  # Remove '[EN] ' prefix
         else:
             clean_sources.append(s)
 
+    # References already cleaned of [VI] tag during loading
     comet_data = [
         {"src": s, "mt": p, "ref": r}
         for s, p, r in zip(clean_sources, predictions, references)
