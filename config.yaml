@@ -19,9 +19,10 @@ lora:
     - "up_proj"
     - "down_proj"
 
-# Quantization (QLoRA)
+# Quantization (QLoRA) - disabled for multi-GPU DDP
+# Set load_in_4bit: true for single-GPU with limited VRAM
 quantization:
-  load_in_4bit: true
+  load_in_4bit: false
   bnb_4bit_quant_type: "nf4"
   bnb_4bit_compute_dtype: "bfloat16"
   bnb_4bit_use_double_quant: true
@@ -51,7 +52,6 @@ training:
 
 # Evaluation (for evaluate.py)
 evaluation:
-  max_samples: 10000  # Set high to evaluate all test samples
   max_new_tokens: 256
   generation_batch_size: 32
   comet_model: "Unbabel/wmt22-comet-da"

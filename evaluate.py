@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from peft import PeftModel
 from sacrebleu import corpus_bleu, corpus_chrf
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 load_dotenv()
 
@@ -64,22 +64,13 @@ def batch_generate(model, tokenizer, prompts: list, max_new_tokens: int) -> list
 
 def clean_prediction(text: str) -> str:
     """Clean prediction to extract only the target translation."""
-    import re
+    text = text.strip()
 
-    if "[VI]" in text and "[EN]" in text:
-        vi_pos = text.rfind("[VI]")
-        en_pos = text.rfind("[EN]")
-        if vi_pos > en_pos:
-            text = text.split("[VI]")[-1].strip()
-        else:
-            text = text.split("[EN]")[-1].strip()
-    elif "[VI]" in text:
-        text = text.split("[VI]")[-1].strip()
-    elif "[EN]" in text:
-        text = text.split("[EN]")[-1].strip()
-
-    text = re.sub(r'(\d+\.\s*){3,}.*$', '', text)
-    text = re.sub(r'[\s\d\.]+$', '', text)
+    # Remove language tags
+    if text.startswith("[VI] "):
+        text = text[5:]
+    elif text.startswith("[EN] "):
+        text = text[5:]
 
     return text.strip()
 
@@ -90,7 +81,7 @@ def compute_perplexity(model, tokenizer, dataset, max_samples: int = 1000) -> fl
     total_loss = 0.0
     total_tokens = 0
 
-    samples = list(dataset.take(max_samples))
+    samples = dataset.select(range(min(max_samples, len(dataset))))
 
     for example in tqdm(samples, desc="Computing perplexity"):
         src = str(example.get("src", "")).strip()
@@ -159,34 +150,25 @@ def evaluate(
     test_split: str = "test",
 ) -> dict:
     """Evaluate model on test set and return metrics."""
-    # Quantization config
-    quant_cfg = config.get("quantization", {})
-    compute_dtype = getattr(torch, quant_cfg.get("bnb_4bit_compute_dtype", "bfloat16"))
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=quant_cfg.get("load_in_4bit", True),
-        bnb_4bit_quant_type=quant_cfg.get("bnb_4bit_quant_type", "nf4"),
-        bnb_4bit_compute_dtype=compute_dtype,
-        bnb_4bit_use_double_quant=quant_cfg.get("bnb_4bit_use_double_quant", True),
-    )
-
     # Load model
     print(f"Loading base model: {config['base_model']}")
     base_model = AutoModelForCausalLM.from_pretrained(
         config["base_model"],
-        quantization_config=bnb_config,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
     )
 
     print(f"Loading adapter from {adapter_model_path}")
-    hf_token = os.getenv("HUGGING_FACE_TOKEN")
-    print(f"Using HF token: {hf_token[:10]}..." if hf_token else "WARNING: No HF token found!")
-    model = PeftModel.from_pretrained(base_model, adapter_model_path, token=hf_token)
-    # Load tokenizer from base model (same tokenizer, avoids auth issues with private adapter repo)
+    model = PeftModel.from_pretrained(
+        base_model,
+        adapter_model_path,
+        token=os.getenv("HUGGING_FACE_TOKEN")
+    )
     tokenizer = AutoTokenizer.from_pretrained(config["base_model"])
     model.eval()
 
-    # Load test dataset from HuggingFace
+    # Load test dataset
     dataset_cfg = config.get("dataset", {})
     hf_repo = dataset_cfg.get("hf_repo", "TranDuong/medical-vlsp-2025")
 
@@ -200,42 +182,38 @@ def evaluate(
         hf_repo,
         data_files={test_split: split_to_file.get(test_split, f"cleaned_data/{test_split}.csv")},
         split=test_split,
-        streaming=True,
+        streaming=False,
         token=os.getenv("HUGGING_FACE_TOKEN"),
     )
 
-    # Compute perplexity first
+    # Compute perplexity
     print("\nComputing perplexity...")
     perplexity = compute_perplexity(model, tokenizer, test_dataset, max_samples=1000)
     print(f"Perplexity: {perplexity:.2f}")
 
-    # Reload dataset for translation evaluation
-    test_dataset = load_dataset(
-        hf_repo,
-        data_files={test_split: split_to_file.get(test_split, f"cleaned_data/{test_split}.csv")},
-        split=test_split,
-        streaming=True,
-        token=os.getenv("HUGGING_FACE_TOKEN"),
-    )
-
     # Parse test data
+    eval_cfg = config.get("evaluation", {})
+    max_samples = eval_cfg.get("max_samples", 2000)
+
+    test_samples = test_dataset.select(range(min(max_samples, len(test_dataset))))
+
     sources = []
     prompts = []
     references = []
 
-    eval_cfg = config.get("evaluation", {})
-    max_samples = eval_cfg.get("max_samples", 2000)
-
-    for example in tqdm(test_dataset.take(max_samples), desc="Loading test data"):
+    for example in tqdm(test_samples, desc="Loading test data"):
         src = str(example.get("src", "")).strip()
         tgt = str(example.get("tgt", "")).strip()
 
         if not src or not tgt:
             continue
 
-        # src already contains [EN] or [VI] prefix
         sources.append(src)
-        prompts.append(src + " ")  # Add space for generation
+        prompts.append(src + " ")
+
+        # Remove language tag from reference
+        if tgt.startswith("[VI] "):
+            tgt = tgt[5:]
         references.append(tgt)
 
     print(f"Loaded {len(sources)} test samples")
@@ -268,19 +246,13 @@ def evaluate(
     comet_model_path = download_model(eval_cfg.get("comet_model", "Unbabel/wmt22-comet-da"))
     comet_model = load_from_checkpoint(comet_model_path)
 
-    # Clean sources for COMET (remove language tags)
-    clean_sources = []
-    for s in sources:
-        if s.startswith("[EN]"):
-            clean_sources.append(s[4:].strip())
-        elif s.startswith("[VI]"):
-            clean_sources.append(s[4:].strip())
-        else:
-            clean_sources.append(s)
-
     comet_data = [
-        {"src": s, "mt": p, "ref": r}
-        for s, p, r in zip(clean_sources, predictions, references)
+        {
+            "src": s[5:] if s.startswith("[EN] ") else s,
+            "mt": p,
+            "ref": r
+        }
+        for s, p, r in zip(sources, predictions, references)
     ]
     comet_score = comet_model.predict(
         comet_data,
