@@ -122,11 +122,11 @@ def save_examples(
     predictions: list,
     references: list,
     output_path: str,
-    num_examples: int,
+    num_examples: int = None,
 ) -> list:
-    """Save random examples to JSON."""
+    """Save examples to JSON. If num_examples is None or -1, save all."""
     indices = list(range(len(sources)))
-    if len(indices) > num_examples:
+    if num_examples and num_examples > 0 and len(indices) > num_examples:
         random.seed(42)
         indices = random.sample(indices, num_examples)
 
@@ -214,8 +214,13 @@ def evaluate(
         sources.append(src)
         prompts.append(src + " ")
 
-        # Reference is just the target text (no tags expected on tgt)
-        references.append(tgt)
+        # Clean reference - remove language tags if present
+        clean_ref = tgt
+        if tgt.startswith("[VI] "):
+            clean_ref = tgt[5:]
+        elif tgt.startswith("[EN] "):
+            clean_ref = tgt[5:]
+        references.append(clean_ref)
 
     print(f"Loaded {len(sources)} test samples")
 
@@ -230,9 +235,9 @@ def evaluate(
         )
         predictions.extend(batch_preds)
 
-    # Save examples
+    # Save examples (all by default, or set num_examples_to_log in config)
     if eval_cfg.get("log_examples", True):
-        num_examples = eval_cfg.get("num_examples_to_log", 100)
+        num_examples = eval_cfg.get("num_examples_to_log")  # None = all
         examples_path = f"{output_dir}/eval_examples.json"
         save_examples(sources, predictions, references, examples_path, num_examples)
 

@@ -57,7 +57,7 @@ evaluation:
   comet_model: "Unbabel/wmt22-comet-da"
   comet_batch_size: 32
   log_examples: true
-  num_examples_to_log: 100
+  num_examples_to_log: null
 
 # W&B
 wandb:
