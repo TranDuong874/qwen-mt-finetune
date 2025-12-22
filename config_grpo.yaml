@@ -24,8 +24,8 @@ quantization:
 
 # Training
 training:
-  per_device_batch_size: 16  # Increased for RTX 5090 (32GB)
-  gradient_accumulation_steps: 2
+  per_device_batch_size: 8  # 8 prompts × 4 generations = 32 seqs, chunked in loss
+  gradient_accumulation_steps: 4
   num_epochs: 1
   max_steps: null  # Set to limit training
   learning_rate: 5e-7

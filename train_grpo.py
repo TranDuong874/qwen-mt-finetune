@@ -502,14 +502,15 @@ def compute_grpo_loss(
     rewards: List[List[float]],
     device,
     beta: float = 0.1,
+    chunk_size: int = 8,  # Process this many sequences at a time
 ) -> torch.Tensor:
     """
-    Compute GRPO loss using group-relative rewards (BATCHED version).
+    Compute GRPO loss using group-relative rewards (CHUNKED BATCHED version).
 
     For each prompt, we have multiple responses with rewards.
     We normalize rewards within each group and weight the log-probs accordingly.
 
-    This version batches all sequences for a single forward pass.
+    This version chunks sequences to avoid OOM on log_softmax.
     """
     # 1. Collect all sequences and compute normalized rewards
     all_texts = []
@@ -550,41 +551,53 @@ def compute_grpo_loss(
 
     input_ids = inputs["input_ids"]  # [N, L]
     attention_mask = inputs["attention_mask"]  # [N, L]
+    num_sequences = input_ids.shape[0]
 
-    # 3. Single forward pass for ALL sequences
-    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-    logits = outputs.logits  # [N, L, V]
+    # 3. Process in chunks to avoid OOM on log_softmax
+    all_seq_log_probs = []
 
-    # 4. Compute log probs with masking
-    # Shift for next-token prediction: predict token[i+1] from logits[i]
-    shift_logits = logits[:, :-1, :]  # [N, L-1, V]
-    shift_labels = input_ids[:, 1:]    # [N, L-1]
-    shift_mask = attention_mask[:, 1:].float()  # [N, L-1]
+    for chunk_start in range(0, num_sequences, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, num_sequences)
 
-    # Log softmax
-    log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
+        chunk_ids = input_ids[chunk_start:chunk_end]
+        chunk_mask = attention_mask[chunk_start:chunk_end]
+        chunk_prompt_lens = all_prompt_lens[chunk_start:chunk_end]
 
-    # Gather log probs for actual tokens
-    token_log_probs = log_probs.gather(-1, shift_labels.unsqueeze(-1)).squeeze(-1)  # [N, L-1]
+        # Forward pass for this chunk
+        outputs = model(input_ids=chunk_ids, attention_mask=chunk_mask)
+        logits = outputs.logits  # [C, L, V]
 
-    # 5. Create response mask (exclude prompt tokens and padding)
-    batch_size, seq_len = shift_labels.shape
-    position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
-    prompt_lens_tensor = torch.tensor(all_prompt_lens, device=device).unsqueeze(1)
+        # Shift for next-token prediction
+        shift_logits = logits[:, :-1, :]  # [C, L-1, V]
+        shift_labels = chunk_ids[:, 1:]    # [C, L-1]
+        shift_mask = chunk_mask[:, 1:].float()  # [C, L-1]
 
-    # Response tokens: position >= prompt_len (shifted by 1 for next-token prediction)
-    response_mask = (position_ids >= (prompt_lens_tensor - 1)).float()
+        # Log softmax and gather (memory-intensive part, now on smaller chunk)
+        log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
+        token_log_probs = log_probs.gather(-1, shift_labels.unsqueeze(-1)).squeeze(-1)
 
-    # Combined mask: response tokens AND not padding
-    combined_mask = response_mask * shift_mask  # [N, L-1]
+        # Free memory immediately
+        del logits, log_probs, shift_logits
 
-    # 6. Compute per-sequence log probs (sum over response tokens)
-    masked_log_probs = token_log_probs * combined_mask
-    seq_log_probs = masked_log_probs.sum(dim=1)  # [N]
+        # Create response mask for this chunk
+        chunk_batch_size, seq_len = shift_labels.shape
+        position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(chunk_batch_size, -1)
+        prompt_lens_tensor = torch.tensor(chunk_prompt_lens, device=device).unsqueeze(1)
 
-    # 7. Compute GRPO loss: -reward * log_prob * beta
+        response_mask = (position_ids >= (prompt_lens_tensor - 1)).float()
+        combined_mask = response_mask * shift_mask
+
+        # Sum log probs for each sequence
+        masked_log_probs = token_log_probs * combined_mask
+        seq_log_probs = masked_log_probs.sum(dim=1)  # [C]
+        all_seq_log_probs.append(seq_log_probs)
+
+    # 4. Combine all chunks
+    all_seq_log_probs = torch.cat(all_seq_log_probs, dim=0)  # [N]
+
+    # 5. Compute GRPO loss: -reward * log_prob * beta
     norm_rewards_tensor = torch.stack(all_norm_rewards)  # [N]
-    losses = -norm_rewards_tensor * seq_log_probs * beta
+    losses = -norm_rewards_tensor * all_seq_log_probs * beta
 
     return losses.mean()
 
