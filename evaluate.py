@@ -123,8 +123,14 @@ def save_examples(
     references: list,
     output_path: str,
     num_examples: int = None,
+    metrics: dict = None,
 ) -> list:
-    """Save examples to JSON. If num_examples is None or -1, save all."""
+    """Save examples to JSON. If num_examples is None or -1, save all.
+
+    Args:
+        metrics: Optional dict of metric_name -> list of per-sample scores.
+                 e.g., {"comet": [0.85, 0.92, ...]}
+    """
     indices = list(range(len(sources)))
     if num_examples and num_examples > 0 and len(indices) > num_examples:
         random.seed(42)
@@ -132,11 +138,17 @@ def save_examples(
 
     examples = []
     for idx in indices:
-        examples.append({
+        example = {
             "source": sources[idx],
             "prediction": predictions[idx],
             "reference": references[idx],
-        })
+        }
+        # Add per-sample metrics if available
+        if metrics:
+            for metric_name, scores in metrics.items():
+                if scores and idx < len(scores):
+                    example[metric_name] = scores[idx]
+        examples.append(example)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -235,12 +247,6 @@ def evaluate(
         )
         predictions.extend(batch_preds)
 
-    # Save examples (all by default, or set num_examples_to_log in config)
-    if eval_cfg.get("log_examples", True):
-        num_examples = eval_cfg.get("num_examples_to_log")  # None = all
-        examples_path = f"{output_dir}/eval_examples.json"
-        save_examples(sources, predictions, references, examples_path, num_examples)
-
     # Compute metrics
     print("\nComputing BLEU...")
     bleu = corpus_bleu(predictions, [references])
@@ -260,11 +266,23 @@ def evaluate(
         }
         for s, p, r in zip(sources, predictions, references)
     ]
-    comet_score = comet_model.predict(
+    comet_output = comet_model.predict(
         comet_data,
         batch_size=eval_cfg.get("comet_batch_size", 32),
         gpus=1,
-    ).system_score
+    )
+    comet_score = comet_output.system_score
+    comet_scores = comet_output.scores  # Per-sample scores
+
+    # Save examples with per-sample metrics
+    if eval_cfg.get("log_examples", True):
+        num_examples = eval_cfg.get("num_examples_to_log")  # None = all
+        examples_path = f"{output_dir}/eval_examples.json"
+        per_sample_metrics = {"comet": comet_scores}
+        save_examples(
+            sources, predictions, references, examples_path,
+            num_examples, metrics=per_sample_metrics
+        )
 
     results = {
         "bleu": bleu.score,
