@@ -504,69 +504,89 @@ def compute_grpo_loss(
     beta: float = 0.1,
 ) -> torch.Tensor:
     """
-    Compute GRPO loss using group-relative rewards.
+    Compute GRPO loss using group-relative rewards (BATCHED version).
 
     For each prompt, we have multiple responses with rewards.
     We normalize rewards within each group and weight the log-probs accordingly.
+
+    This version batches all sequences for a single forward pass.
     """
-    total_loss = torch.tensor(0.0, device=device, requires_grad=True)
-    count = 0
+    # 1. Collect all sequences and compute normalized rewards
+    all_texts = []
+    all_prompt_lens = []
+    all_norm_rewards = []
 
     for prompt, resps, rews in zip(prompts, responses, rewards):
         if len(resps) == 0:
             continue
 
-        # Normalize rewards within group (subtract mean, divide by std)
+        # Normalize rewards within group
         rews_tensor = torch.tensor(rews, dtype=torch.float32, device=device)
         mean_rew = rews_tensor.mean()
         std_rew = rews_tensor.std() + 1e-8
         normalized_rews = (rews_tensor - mean_rew) / std_rew
 
+        # Pre-compute prompt length (tokenize once per prompt, not per response)
+        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        prompt_len = len(prompt_ids)
+
         for resp, norm_rew in zip(resps, normalized_rews):
-            # Tokenize full sequence
-            full_text = prompt + resp + tokenizer.eos_token
-            inputs = tokenizer(
-                full_text,
-                return_tensors="pt",
-                truncation=True,
-                max_length=512,
-            ).to(device)
+            all_texts.append(prompt + resp + tokenizer.eos_token)
+            all_prompt_lens.append(prompt_len)
+            all_norm_rewards.append(norm_rew.detach())
 
-            # Forward pass WITH gradients for policy learning
-            outputs = model(**inputs)
-            logits = outputs.logits
-
-            # Compute log prob of response tokens only
-            prompt_ids = tokenizer(
-                prompt, add_special_tokens=False
-            )["input_ids"]
-            prompt_len = len(prompt_ids)
-
-            # Shift for next token prediction
-            shift_logits = logits[:, prompt_len:-1, :]
-            shift_labels = inputs["input_ids"][:, prompt_len + 1:]
-
-            if shift_logits.shape[1] == 0:
-                continue  # Skip if no response tokens
-
-            # Cross entropy per token
-            log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
-            token_log_probs = log_probs.gather(
-                -1, shift_labels.unsqueeze(-1)
-            ).squeeze(-1)
-
-            # Sum log probs for sequence
-            seq_log_prob = token_log_probs.sum()
-
-            # GRPO loss: -reward * log_prob (detach norm_rew to avoid grad issues)
-            loss = -norm_rew.detach() * seq_log_prob * beta
-            total_loss = total_loss + loss
-            count += 1
-
-    if count == 0:
+    if len(all_texts) == 0:
         return torch.tensor(0.0, device=device, requires_grad=True)
 
-    return total_loss / count
+    # 2. Batch tokenize all sequences (right-padded for loss computation)
+    inputs = tokenizer(
+        all_texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=512,
+        add_special_tokens=False,
+    ).to(device)
+
+    input_ids = inputs["input_ids"]  # [N, L]
+    attention_mask = inputs["attention_mask"]  # [N, L]
+
+    # 3. Single forward pass for ALL sequences
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    logits = outputs.logits  # [N, L, V]
+
+    # 4. Compute log probs with masking
+    # Shift for next-token prediction: predict token[i+1] from logits[i]
+    shift_logits = logits[:, :-1, :]  # [N, L-1, V]
+    shift_labels = input_ids[:, 1:]    # [N, L-1]
+    shift_mask = attention_mask[:, 1:].float()  # [N, L-1]
+
+    # Log softmax
+    log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
+
+    # Gather log probs for actual tokens
+    token_log_probs = log_probs.gather(-1, shift_labels.unsqueeze(-1)).squeeze(-1)  # [N, L-1]
+
+    # 5. Create response mask (exclude prompt tokens and padding)
+    batch_size, seq_len = shift_labels.shape
+    position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
+    prompt_lens_tensor = torch.tensor(all_prompt_lens, device=device).unsqueeze(1)
+
+    # Response tokens: position >= prompt_len (shifted by 1 for next-token prediction)
+    response_mask = (position_ids >= (prompt_lens_tensor - 1)).float()
+
+    # Combined mask: response tokens AND not padding
+    combined_mask = response_mask * shift_mask  # [N, L-1]
+
+    # 6. Compute per-sequence log probs (sum over response tokens)
+    masked_log_probs = token_log_probs * combined_mask
+    seq_log_probs = masked_log_probs.sum(dim=1)  # [N]
+
+    # 7. Compute GRPO loss: -reward * log_prob * beta
+    norm_rewards_tensor = torch.stack(all_norm_rewards)  # [N]
+    losses = -norm_rewards_tensor * seq_log_probs * beta
+
+    return losses.mean()
 
 
 def train(config: dict):

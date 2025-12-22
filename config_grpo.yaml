@@ -24,8 +24,8 @@ quantization:
 
 # Training
 training:
-  per_device_batch_size: 2
-  gradient_accumulation_steps: 4
+  per_device_batch_size: 16  # Increased for RTX 5090 (32GB)
+  gradient_accumulation_steps: 2
   num_epochs: 1
   max_steps: null  # Set to limit training
   learning_rate: 5e-7
@@ -34,7 +34,7 @@ training:
 
   # Generation settings
   num_generations: 4  # Responses per prompt
-  max_new_tokens: 128
+  max_new_tokens: 256
   max_prompt_length: 256
   temperature: 0.7
   top_p: 0.9
@@ -45,16 +45,16 @@ training:
   # Logging
   logging_steps: 10
   save_steps: 200
-  dataloader_num_workers: 2
+  dataloader_num_workers: 4  # Increased for faster data loading
 
 # Reward function weights (must sum to ~1.0)
 reward:
-  use_comet: true
-  use_bleu: false
+  use_comet: false
+  use_bleu: true
   use_numeric: true  # Numeric accuracy reward for medical translation
   comet_model: Unbabel/wmt22-comet-da
-  comet_weight: 0.55      # COMET quality score
-  bleu_weight: 0.0
+  comet_weight: 0.0      # COMET quality score
+  bleu_weight: 0.55
   length_weight: 0.1      # Length ratio penalty
   no_copy_weight: 0.1     # Source copying penalty
   not_empty_weight: 0.1   # Empty output penalty
