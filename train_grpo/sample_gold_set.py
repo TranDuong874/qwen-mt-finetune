@@ -152,11 +152,18 @@ def score_with_comet(
     return output.scores
 
 
-def bin_by_comet(df: pd.DataFrame, output_dir: str):
-    """Bin samples by COMET score and export to separate files."""
+def bin_by_comet(df: pd.DataFrame, output_dir: str, final_size: int = None, seed: int = 42):
+    """Bin samples by COMET score and export to separate files.
+
+    Args:
+        df: DataFrame with 'comet' column
+        output_dir: Output directory
+        final_size: If set, subsample to this size with 70/20/10 distribution
+        seed: Random seed for subsampling
+    """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Define bins: 70% good (>=0.8), 20% medium (0.6-0.8), 10% bad (<0.6)
+    # Define bins
     bins = [
         ("00_very_bad", 0.0, 0.6),
         ("01_bad", 0.6, 0.7),
@@ -165,31 +172,101 @@ def bin_by_comet(df: pd.DataFrame, output_dir: str):
         ("04_excellent", 0.9, 1.0),
     ]
 
-    print("\nCOMET Score Distribution:")
+    print("\nCOMET Score Distribution (full sample):")
     print("-" * 40)
 
+    bin_dfs = {}
     for bin_name, lo, hi in bins:
         if bin_name == "04_excellent":
             subset = df[(df["comet"] >= lo) & (df["comet"] <= hi)]
         else:
             subset = df[(df["comet"] >= lo) & (df["comet"] < hi)]
 
+        bin_dfs[bin_name] = subset
         pct = len(subset) / len(df) * 100
         print(f"{lo:.1f}–{hi:.1f}: {len(subset):5d} ({pct:5.1f}%)")
 
+    print("-" * 40)
+
+    # Export all bins
+    for bin_name, subset in bin_dfs.items():
         if len(subset) > 0:
-            # Sort by comet score ascending (worst first for review)
             subset_sorted = subset.sort_values("comet", ascending=True)
             output_path = os.path.join(output_dir, f"{bin_name}.csv")
             subset_sorted.to_csv(output_path, index=False, encoding="utf-8")
-            print(f"  -> Saved to {output_path}")
+            print(f"  -> Saved {len(subset)} to {output_path}")
 
-    print("-" * 40)
-
-    # Also save full dataset with scores
+    # Save full dataset with scores
     full_path = os.path.join(output_dir, "all_scored.csv")
     df.to_csv(full_path, index=False, encoding="utf-8")
     print(f"\nFull dataset saved to {full_path}")
+
+    # Stratified subsampling for final gold set
+    if final_size:
+        print(f"\n{'='*40}")
+        print(f"Creating final gold set: {final_size} samples")
+        print("Distribution: 70% good, 20% medium, 10% bad")
+        print("="*40)
+
+        # Target counts
+        n_good = int(final_size * 0.70)      # 70% from good+excellent (>=0.8)
+        n_medium = int(final_size * 0.20)    # 20% from medium (0.7-0.8)
+        n_bad = final_size - n_good - n_medium  # 10% from bad (<0.7)
+
+        # Combine bins into tiers
+        df_good = pd.concat([bin_dfs["03_good"], bin_dfs["04_excellent"]])
+        df_medium = bin_dfs["02_medium"]
+        df_bad = pd.concat([bin_dfs["00_very_bad"], bin_dfs["01_bad"]])
+
+        # Sample from each tier
+        samples = []
+
+        # Good tier (70%)
+        if len(df_good) >= n_good:
+            samples.append(df_good.sample(n=n_good, random_state=seed))
+        else:
+            print(f"  Warning: Only {len(df_good)} good samples, need {n_good}")
+            samples.append(df_good)
+
+        # Medium tier (20%)
+        if len(df_medium) >= n_medium:
+            samples.append(df_medium.sample(n=n_medium, random_state=seed))
+        else:
+            print(f"  Warning: Only {len(df_medium)} medium samples, need {n_medium}")
+            samples.append(df_medium)
+
+        # Bad tier (10%) - these need manual fixing
+        if len(df_bad) >= n_bad:
+            samples.append(df_bad.sample(n=n_bad, random_state=seed))
+        else:
+            print(f"  Warning: Only {len(df_bad)} bad samples, need {n_bad}")
+            samples.append(df_bad)
+
+        final_df = pd.concat(samples, ignore_index=True)
+        final_df = final_df.sample(frac=1, random_state=seed).reset_index(drop=True)
+
+        # Save final gold set
+        gold_path = os.path.join(output_dir, "gold_set.csv")
+        final_df.to_csv(gold_path, index=False, encoding="utf-8")
+
+        # Also save by tier for review
+        final_good = final_df[final_df["comet"] >= 0.8]
+        final_medium = final_df[(final_df["comet"] >= 0.7) & (final_df["comet"] < 0.8)]
+        final_bad = final_df[final_df["comet"] < 0.7]
+
+        final_good.to_csv(os.path.join(output_dir, "gold_good.csv"), index=False)
+        final_medium.to_csv(os.path.join(output_dir, "gold_medium.csv"), index=False)
+        final_bad.sort_values("comet").to_csv(
+            os.path.join(output_dir, "gold_bad_TO_FIX.csv"), index=False
+        )
+
+        print(f"\nFinal gold set: {len(final_df)} samples")
+        print(f"  Good (>=0.8):    {len(final_good):5d} ({len(final_good)/len(final_df)*100:.1f}%)")
+        print(f"  Medium (0.7-0.8): {len(final_medium):5d} ({len(final_medium)/len(final_df)*100:.1f}%)")
+        print(f"  Bad (<0.7):       {len(final_bad):5d} ({len(final_bad)/len(final_df)*100:.1f}%) <- FIX THESE")
+        print(f"\nSaved to:")
+        print(f"  {gold_path} (full)")
+        print(f"  gold_good.csv, gold_medium.csv, gold_bad_TO_FIX.csv (by tier)")
 
     # Print summary stats
     print(f"\nSummary Statistics:")
@@ -245,6 +322,12 @@ def main():
         action="store_true",
         help="Skip inference, load from existing scored file",
     )
+    parser.add_argument(
+        "--final_size",
+        type=int,
+        default=5000,
+        help="Final gold set size with 70/20/10 distribution (0 to skip)",
+    )
     args = parser.parse_args()
 
     if args.skip_inference:
@@ -292,7 +375,12 @@ def main():
         df["comet"] = scores
 
     # Bin and export
-    bin_by_comet(df, args.output_dir)
+    bin_by_comet(
+        df,
+        args.output_dir,
+        final_size=args.final_size if args.final_size > 0 else None,
+        seed=args.seed,
+    )
 
     print("\nDone!")
     print("\nNext steps:")
