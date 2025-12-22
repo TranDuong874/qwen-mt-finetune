@@ -1,0 +1,72 @@
+# GRPO Training Configuration for Medical Translation
+
+experiment_name: qwen-medical-grpo
+
+# Base model and adapter
+base_model: Qwen/Qwen2.5-0.5B
+adapter_path: TranDuong/qwen-medical-mt-grpo  # CPT adapter to fine-tune with GRPO
+
+# Output
+output_dir: outputs_grpo
+
+# Dataset - uses gold set created from sampling
+dataset:
+  hf_repo: TranDuong/medical-vlsp-2025
+  # local_path: dataset/grpo_gold/gold_3k.csv  # Alternative: local file
+  max_samples: null  # Use all samples
+
+# Quantization (4-bit for memory efficiency)
+quantization:
+  load_in_4bit: true
+  bnb_4bit_compute_dtype: bfloat16
+  bnb_4bit_quant_type: nf4
+  bnb_4bit_use_double_quant: true
+
+# Training
+training:
+  per_device_batch_size: 2
+  gradient_accumulation_steps: 4
+  num_epochs: 1
+  max_steps: null  # Set to limit training
+  learning_rate: 5e-7
+  warmup_ratio: 0.1
+  bf16: true
+
+  # Generation settings
+  num_generations: 4  # Responses per prompt
+  max_new_tokens: 128
+  max_prompt_length: 256
+  temperature: 0.7
+  top_p: 0.9
+
+  # GRPO specific
+  beta: 0.1  # KL penalty coefficient
+
+  # Logging
+  logging_steps: 10
+  save_steps: 200
+  dataloader_num_workers: 2
+
+# Reward function weights (must sum to ~1.0)
+reward:
+  use_comet: true
+  use_bleu: false
+  use_numeric: true  # Numeric accuracy reward for medical translation
+  comet_model: Unbabel/wmt22-comet-da
+  comet_weight: 0.55      # COMET quality score
+  bleu_weight: 0.0
+  length_weight: 0.1      # Length ratio penalty
+  no_copy_weight: 0.1     # Source copying penalty
+  not_empty_weight: 0.1   # Empty output penalty
+  numeric_weight: 0.15    # Numeric accuracy (preserve numbers correctly)
+
+# W&B logging
+wandb:
+  enabled: true
+  project: qwen-mt-grpo
+
+# HuggingFace Hub
+huggingface:
+  push_best_model: true
+  repo_id: TranDuong/qwen-medical-mt-grpo
+  private: true

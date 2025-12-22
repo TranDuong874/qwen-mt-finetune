@@ -22,3 +22,8 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+
+assets/
+
+train_grpo/plan.md/
+train_grpo/eval_examples.json
