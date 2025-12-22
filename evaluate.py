@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from peft import PeftModel
 from sacrebleu import corpus_bleu, corpus_chrf
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 load_dotenv()
 
@@ -150,21 +150,11 @@ def evaluate(
     test_split: str = "test",
 ) -> dict:
     """Evaluate model on test set and return metrics."""
-    # Quantization config
-    quant_cfg = config.get("quantization", {})
-    compute_dtype = getattr(torch, quant_cfg.get("bnb_4bit_compute_dtype", "bfloat16"))
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=quant_cfg.get("load_in_4bit", True),
-        bnb_4bit_quant_type=quant_cfg.get("bnb_4bit_quant_type", "nf4"),
-        bnb_4bit_compute_dtype=compute_dtype,
-        bnb_4bit_use_double_quant=quant_cfg.get("bnb_4bit_use_double_quant", True),
-    )
-
     # Load model
     print(f"Loading base model: {config['base_model']}")
     base_model = AutoModelForCausalLM.from_pretrained(
         config["base_model"],
-        quantization_config=bnb_config,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
     )

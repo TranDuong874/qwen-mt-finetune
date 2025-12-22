@@ -18,7 +18,6 @@ from torch.utils.data import Dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     Trainer,
     TrainerCallback,
     TrainingArguments,
@@ -246,23 +245,11 @@ def train(config: dict):
     """Main training function."""
     use_wandb = setup_wandb(config)
 
-    # Quantization config
-    quant_cfg = config.get("quantization", {})
-    compute_dtype = getattr(torch, quant_cfg.get("bnb_4bit_compute_dtype", "bfloat16"))
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=quant_cfg.get("load_in_4bit", True),
-        bnb_4bit_quant_type=quant_cfg.get("bnb_4bit_quant_type", "nf4"),
-        bnb_4bit_compute_dtype=compute_dtype,
-        bnb_4bit_use_double_quant=quant_cfg.get("bnb_4bit_use_double_quant", True),
-    )
-
-    # Load base model
+    # Load base model (no quantization for multi-GPU training)
     print(f"Loading base model: {config['base_model']}")
-    # When using accelerate with quantization, use current_device
     base_model = AutoModelForCausalLM.from_pretrained(
         config["base_model"],
-        quantization_config=bnb_config,
-        device_map={'': torch.cuda.current_device()},
+        torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     )
 
