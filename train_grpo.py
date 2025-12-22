@@ -8,6 +8,7 @@ import argparse
 import gc
 import math
 import os
+import time
 from typing import Dict, List, Callable
 
 import torch
@@ -769,6 +770,8 @@ def train(config: dict):
         )
 
         for batch in progress_bar:
+            t_start = time.time()
+
             # Generate responses
             model.eval()
             responses = generate_responses(
@@ -782,21 +785,35 @@ def train(config: dict):
                 top_p=top_p,
             )
             model.train()
+            t_gen = time.time()
 
-            # Compute rewards for all responses
+            # Flatten all responses for batched reward computation
+            all_sources = []
+            all_generations = []
+            all_references = []
+            response_counts = []  # Track how many responses per prompt
+
+            for src, ref, resps in zip(batch["sources"], batch["references"], responses):
+                all_sources.extend([src] * len(resps))
+                all_generations.extend(resps)
+                all_references.extend([ref] * len(resps))
+                response_counts.append(len(resps))
+
+            # Single batched reward call (MUCH faster than per-prompt)
+            rewards_dict = reward_combiner(all_sources, all_generations, all_references)
+            all_combined = rewards_dict["combined"]
+
+            # Reshape back to per-prompt groups
             batch_rewards = []
-            for i, (src, ref, resps) in enumerate(
-                zip(batch["sources"], batch["references"], responses)
-            ):
-                sources = [src] * len(resps)
-                references = [ref] * len(resps)
+            idx = 0
+            for count in response_counts:
+                batch_rewards.append(all_combined[idx:idx + count])
+                idx += count
 
-                rewards_dict = reward_combiner(sources, resps, references)
-                batch_rewards.append(rewards_dict["combined"])
-
-                # Track average reward
-                total_reward += sum(rewards_dict["combined"])
-                reward_count += len(resps)
+            # Track average reward
+            total_reward += sum(all_combined)
+            reward_count += len(all_combined)
+            t_reward = time.time()
 
             # Compute GRPO loss
             with accelerator.accumulate(model):
@@ -814,6 +831,7 @@ def train(config: dict):
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+            t_loss = time.time()
 
             if accelerator.sync_gradients:
                 global_step += 1
@@ -826,11 +844,18 @@ def train(config: dict):
                     avg_reward = total_reward / max(reward_count, 1)
                     lr = lr_scheduler.get_last_lr()[0]
 
+                    # Timing breakdown
+                    gen_time = t_gen - t_start
+                    reward_time = t_reward - t_gen
+                    loss_time = t_loss - t_reward
+                    total_time = t_loss - t_start
+
                     if accelerator.is_main_process:
                         progress_bar.set_postfix({
                             "loss": f"{loss.item():.4f}",
                             "reward": f"{avg_reward:.4f}",
-                            "lr": f"{lr:.2e}",
+                            "gen": f"{gen_time:.1f}s",
+                            "rew": f"{reward_time:.1f}s",
                         })
 
                         if use_wandb:
@@ -839,6 +864,10 @@ def train(config: dict):
                                 "train/avg_reward": avg_reward,
                                 "train/learning_rate": lr,
                                 "train/global_step": global_step,
+                                "timing/generation_sec": gen_time,
+                                "timing/reward_sec": reward_time,
+                                "timing/loss_sec": loss_time,
+                                "timing/total_sec": total_time,
                             })
 
                     total_reward = 0
