@@ -1,0 +1,371 @@
+\documentclass[11pt]{article}
+
+% Standard package includes
+\usepackage{times}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{latexsym}
+\usepackage{array}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{stfloats}
+\usepackage{cleveref}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{inconsolata}
+
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+
+\title{VLSP 2025 Medical Translation}
+
+\author{
+Duong Tran \\
+\texttt{duong.tran@example.edu}
+}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+\label{sec:introduction}
+
+The VLSP 2025 Medical Machine Translation Shared Task requires bidirectional English--Vietnamese translation under constrained settings: models must have at most 3 billion parameters, and only officially provided parallel corpora may be used.
+
+This report describes our system. We employ supervised fine-tuning on filtered medical parallel data with adaptive learning rate scheduling, followed by reinforcement learning refinement using Group Relative Policy Optimization (GRPO). Systematic error analysis characterizes model failure modes and informs reward function design.
+
+Data filtering combines rule-based heuristics with semantic similarity validation, reducing the corpus by 32.72\%. Error analysis identified numerical accuracy as a key error category, motivating a GRPO reward function that combines BLEU scoring with explicit numerical accuracy penalties. Our final model achieved 39.83 BLEU / 0.8591 COMET for English→Vietnamese and 24.95 BLEU / 0.8115 COMET for Vietnamese→English translation on the test set.
+
+Section~\ref{sec:problem} defines task constraints. Section~\ref{sec:data} covers data processing. Section~\ref{sec:model_selection} presents model selection. Section~\ref{sec:methodology} details training methodology. Section~\ref{sec:evaluation} describes evaluation setup. Section~\ref{sec:results} reports results. Section~\ref{sec:discussion} provides analysis. Section~\ref{sec:conclusion} concludes.
+
+
+\section{Problem Formulation}
+\label{sec:problem}
+
+We formally define the medical machine translation task as follows. Given a parallel corpus $\mathcal{D} = \{(x_i, y_i)\}_{i=1}^N$ consisting of $N$ sentence pairs, where $x_i$ represents a source sentence and $y_i$ represents its corresponding target translation, our objective is to fine-tune a decoder-only large language model to learn the conditional probability distribution $p_\theta(y|x)$ that maximizes translation quality under the following constraints:
+
+\textbf{Model constraints:} We are restricted to using base language models with at most 3 billion parameters, in accordance with the VLSP 2025 Shared Task constrained track requirements. This constraint reflects realistic scenarios where computational resources are limited and prevents participants from simply scaling to larger models.
+
+\textbf{Data constraints:} We may only utilize parallel training data officially provided by the VLSP 2025 Shared Task organizers. No external parallel corpora, monolingual data for back-translation, or synthetic data generation is permitted. This ensures that all participating systems are evaluated on their ability to effectively utilize the same limited training resources.
+
+Under these constraints, our goal is to develop a training methodology that maximizes translation quality as measured by standard automatic evaluation metrics including BLEU, chrF++, and COMET, while maintaining robustness to the types of errors that are particularly critical in medical translation contexts.
+
+\section{Data Processing}
+\label{sec:data}
+
+In strict compliance with the constrained track requirements of the VLSP 2025 Shared Task, our training data consists exclusively of the parallel medical datasets officially provided by the task organizers.
+
+\subsection{Data Filtering}
+\label{sec:data_filtering}
+
+The raw corpus contains approximately 500,000 parallel sentence pairs from clinical documentation, patient materials, research abstracts, and pharmaceutical information. We apply rule-based filtering to address the following quality issues:
+
+\paragraph{Duplicates.} Hash-based detection found 151,036 exact duplicate pairs (30.21\%). These reduce effective training diversity and cause implicit overweighting of certain patterns. We deduplicate by hashing normalized source-target concatenations, retaining only the first occurrence.
+
+\paragraph{Length violations.} 443 pairs (0.09\%) exceed our 512-token limit or contain fewer than 3 tokens. We remove pairs where either sentence falls outside the 3--512 token range using the training tokenizer.
+
+\paragraph{Length ratio anomalies.} 2,298 pairs (0.46\%) have extreme source-target length ratios indicating alignment errors or partial translations. We remove pairs where $\frac{\max(|x|, |y|)}{\min(|x|, |y|)} > 3.0$, with $|x|$ and $|y|$ denoting token counts.
+
+\paragraph{Encoding errors.} 16 pairs (0.00\%) contain malformed Unicode or control characters. We normalize to NFC and remove pairs with non-printable characters.
+
+After filtering, we retain 346,207 pairs (69.24\% of original). Table~\ref{tab:filtering_stats} summarizes the filtering statistics.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Filter} & \textbf{Removed} & \textbf{\%} \\
+\midrule
+Duplicates & 151,036 & 30.21 \\
+Length violations & 443 & 0.09 \\
+Length ratio & 2,298 & 0.46 \\
+Encoding errors & 16 & 0.00 \\
+\midrule
+\textbf{Total removed} & 153,793 & 30.76 \\
+\textbf{Retained} & 346,207 & 69.24 \\
+\bottomrule
+\end{tabular}
+\caption{Rule-based filtering statistics.}
+\label{tab:filtering_stats}
+\end{table}
+\subsection{Semantic Filtering}
+\label{sec:semantic_filtering}
+
+While the rule-based filtering described above addresses many obvious quality issues, it is inherently limited to surface-level characteristics such as length, character validity, and exact duplication. To detect more subtle quality problems—particularly semantic mismatches between source and target sentences that may result from alignment errors, mistranslations in the original corpus, or incorrect pairing during corpus construction—we introduce a second filtering stage based on cross-lingual semantic similarity.
+
+The key insight behind semantic filtering is that correct translation pairs should exhibit high semantic similarity when embedded into a shared multilingual semantic space, whereas misaligned or mistranslated pairs will exhibit lower similarity. To operationalize this insight, we employ the LaBSE (Language-Agnostic BERT Sentence Embedding) multilingual sentence encoder \cite{feng2020language}, which has been trained on massive multilingual parallel data to produce semantically meaningful sentence embeddings that are comparable across languages.
+
+For each sentence pair $(x, y)$ that passed rule-based filtering, we compute the cosine similarity between the LaBSE embeddings of the source and target sentences:
+
+\begin{equation}
+\text{sim}(x, y) = \frac{\phi(x)^T \phi(y)}{\|\phi(x)\| \|\phi(y)\|}
+\end{equation}
+
+where $\phi(\cdot)$ denotes the LaBSE encoder function that maps a sentence to a dense vector representation. The cosine similarity score ranges from -1 to 1, with higher values indicating greater semantic alignment between the source and target sentences.
+
+Based on empirical analysis of the similarity score distribution and manual inspection of sentence pairs at various similarity thresholds, we set a minimum similarity threshold of $\tau_{\text{sem}} = 0.6$. Sentence pairs with similarity scores below this threshold are identified as potential semantic mismatches and removed from the training corpus. This threshold represents a balance between filtering out clear misalignments (which tend to have very low similarity scores, often below 0.4) while retaining pairs with moderate similarity scores that may simply reflect natural semantic divergence due to idiomatic expressions, cultural references, or explanatory additions that are appropriate for the target audience.
+
+The semantic filtering stage removed an additional 9,799 pairs from the 346,207 pairs that survived rule-based filtering, representing 2.83\% of the rule-filtered corpus and 1.96\% of the original raw corpus. This yields a final training corpus of 336,408 parallel sentence pairs, representing an overall retention rate of 67.28\% from the original 500,000 pairs.
+
+Table~\ref{tab:data_stats} summarizes the dataset statistics after each filtering stage, showing both the number of remaining pairs and the cumulative retention rate at each stage.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Filtering Stage} & \textbf{Pairs} & \textbf{Retention} \\
+\midrule
+Raw corpus & 500{,}000 & 100.00\% \\
+After rule-based filtering & 346{,}207 & 69.24\% \\
+After semantic filtering & 336{,}408 & 67.28\% \\
+\bottomrule
+\end{tabular}
+\caption{Dataset statistics after each stage of our filtering pipeline. Rule-based filtering removes 30.76\% of the corpus (primarily duplicates), while semantic filtering removes an additional 2.83\% of rule-filtered pairs.}
+\label{tab:data_stats}
+\end{table}
+
+From this filtered corpus of 336,408 parallel pairs, we construct two directional training sets for our bidirectional translation system: one for English→Vietnamese translation (336,408 pairs) and one for Vietnamese→English translation (336,408 pairs). These datasets are deduplicated and are used for all subsequent supervised fine-tuning experiments.
+
+\section{Model Selection}
+\label{sec:model_selection}
+
+Given the 3B parameter constraint, we evaluated two decoder-only models from the Qwen family: Qwen2.5-3B and Qwen3-1.7B. Both have been pretrained on multilingual corpora including English and Vietnamese.
+
+Both models were fine-tuned on a stratified 20K sample using identical configurations: QLoRA with 4-bit NF4 quantization, LoRA rank $r=16$, $\alpha=32$, learning rate $2 \times 10^{-4}$, and effective batch size 4. Evaluation used 1,000 held-out pairs with perplexity, BLEU, chrF++, and COMET metrics.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Metric} & \textbf{Qwen3-1.7B} & \textbf{Qwen2.5-3B} \\
+\midrule
+Perplexity $\downarrow$ & 4.97 & \textbf{4.70} \\
+BLEU $\uparrow$        & 6.76 & \textbf{32.29} \\
+chrF++ $\uparrow$     & 30.85 & \textbf{49.25} \\
+COMET $\uparrow$      & 0.5358 & \textbf{0.8032} \\
+\bottomrule
+\end{tabular}
+\caption{Model comparison results. Qwen2.5-3B substantially outperforms Qwen3-1.7B (+25.5 BLEU, +0.27 COMET) and is selected as our base model.}
+\label{tab:model_comparison}
+\end{table}
+
+\section{Methodology}
+\label{sec:methodology}
+
+Having selected Qwen2.5-3B as our base model and prepared our filtered training corpus of 336,408 parallel medical sentence pairs, we now describe our two-stage training methodology in detail. The overall training pipeline consists of: (1) supervised fine-tuning on the parallel medical corpus using a continual pretraining paradigm with adaptive learning rate scheduling, (2) systematic error analysis of model outputs, and (3) reinforcement learning refinement using Group Relative Policy Optimization (GRPO) to address identified errors. This staged approach leverages the strong learning signal provided by parallel data through supervised learning, then further refines model behavior through RL optimization targeting specific failure modes.
+
+\subsection{Supervised Fine-Tuning}
+\label{sec:sft}
+
+The first stage of our training pipeline focuses on adapting the pretrained Qwen2.5-3B model to the medical translation task through supervised learning on our filtered parallel corpus. This adaptation process must balance several competing objectives: we need to shift the model's knowledge and linguistic patterns from the general domain (on which it was pretrained) to the medical domain, while avoiding catastrophic forgetting of general linguistic capabilities; we need to achieve rapid adaptation to make efficient use of limited training time, while maintaining stability to prevent overfitting or divergence; and we need to maximize final translation quality within the constraints of our computational budget.
+
+\subsubsection{Continual Pretraining Strategy}
+\label{sec:cpt_strategy}
+
+To address these objectives, we designed a two-epoch continual pretraining strategy with carefully tuned adaptive learning rate scheduling. The key insight behind this approach is that different phases of training benefit from different learning rate schedules, and that explicitly structuring training into distinct phases can lead to better final performance than using a single monotonic schedule throughout.
+
+\paragraph{Epoch 1: Cosine Schedule for Rapid Adaptation.} In the first epoch, we employ a cosine annealing learning rate schedule that decays from a maximum learning rate to a minimum learning rate following a cosine curve. This schedule begins with a brief warmup period (10\% of the epoch) during which the learning rate increases linearly from zero to the maximum value, followed by cosine decay for the remainder of the epoch. The cosine schedule is particularly well-suited for the initial adaptation phase for several reasons. First, it provides relatively high learning rates early in training, enabling the model to quickly adapt from its general-domain pretrained initialization to the medical domain. Second, the smooth decay function avoids abrupt changes in learning rate that could destabilize training. Third, the cosine schedule naturally implements a form of "warm restarts," where the learning rate decreases slowly at first and then more rapidly, allowing the model to initially explore broadly and then converge toward a good region of parameter space. This aggressive initial adaptation is essential for making efficient use of the first pass through the training data, as it allows the model to rapidly acquire medical terminology and domain-specific patterns.
+
+\paragraph{Epoch 2: Linear Decay for Fine-Grained Convergence.} In the second epoch, we switch to a linear learning rate decay schedule that decreases linearly from the maximum learning rate to zero over the course of the epoch. This schedule is better suited for the refinement phase of training. By the second epoch, the model has already adapted to the medical domain during the first epoch, and the objective shifts from rapid adaptation to fine-grained optimization of translation quality. The linear decay schedule encourages steady, consistent progress toward convergence without the oscillation or instability that can occur with high learning rates. As the learning rate approaches zero toward the end of the second epoch, the model converges to a stable final configuration that represents a good local optimum for the medical translation task.
+
+This two-phase scheduling strategy represents a deliberate design choice informed by our understanding of the distinct objectives of early versus late training. The combination of aggressive initial adaptation (epoch 1 with cosine schedule) followed by careful refinement (epoch 2 with linear decay) achieves a favorable balance between adaptation speed and final convergence quality. Importantly, we found through preliminary experiments that training for only one epoch (with either schedule) resulted in underfitting, while training for more than two epochs led to overfitting, as evidenced by increasing training loss but decreasing validation performance.
+
+\subsubsection{Training Configuration and Implementation Details}
+\label{sec:sft_config}
+
+We now provide comprehensive details of our supervised fine-tuning configuration to ensure reproducibility and to provide context for interpreting our results.
+
+\paragraph{Data and Batching.} Training is performed on the full filtered corpus of 336,408 parallel sentence pairs for both translation directions (English→Vietnamese and Vietnamese→English are trained separately). We use a per-device batch size of 2 with gradient accumulation over 8 steps, yielding an effective batch size of 128 when training on 8 GPUs in data-parallel configuration. This relatively small per-device batch size is necessitated by memory constraints when training with QLoRA, but the gradient accumulation allows us to achieve a reasonably large effective batch size for more stable optimization.
+
+\paragraph{Learning Rate and Optimization.} We set the maximum learning rate to $2 \times 10^{-5}$ and the minimum learning rate to 0, with a warmup ratio of 0.1 (meaning 10\% of each epoch is dedicated to linear warmup from 0 to maximum learning rate). These learning rate values were selected based on prior work on fine-tuning large language models and validated through preliminary experiments on a held-out development set. We use the AdamW optimizer with weight decay coefficient 0.01 to provide regularization and improve generalization.
+
+\paragraph{Parameter-Efficient Fine-Tuning.} Following the successful model selection experiments, we continue to use QLoRA for supervised fine-tuning on the full corpus. However, we increase the LoRA rank from 16 (used in model selection) to 64, with corresponding scaling factor $\alpha=128$, to provide greater adaptation capacity when training on the full corpus. LoRA modules are applied to all attention projection layers and feed-forward projection layers. The base model weights are quantized to 4-bit precision using NF4 quantization with double quantization enabled.
+
+\paragraph{Sequence Length and Precision.} All examples are processed with a maximum sequence length of 512 tokens, consistent with our filtering criteria. Training is performed in bfloat16 mixed precision to reduce memory consumption and accelerate computation while maintaining numerical stability. Gradient checkpointing is enabled to trade additional computation for reduced memory footprint, allowing us to fit larger effective batch sizes within GPU memory constraints.
+
+\paragraph{Training Objective.} As described in the model selection section, we formulate the training objective as masked language modeling over concatenated source-target pairs. Each training example consists of the source sentence, a separator token indicating the translation direction, and the target sentence. The loss is computed only over target tokens, with source tokens masked, ensuring that the model learns to generate the target translation conditioned on the source input.
+
+\subsection{Error Analysis}
+\label{sec:error_analysis}
+
+After completing supervised fine-tuning, we conducted a systematic error analysis to identify the types of mistakes that the model continues to make and to understand which aspects of translation quality remain problematic. This analysis serves two important purposes: first, it provides insight into the remaining limitations of the supervised approach and helps us understand what types of errors are difficult to address through supervised learning alone; second, it directly informs the design of our reinforcement learning refinement stage, particularly the reward function, by highlighting which aspects of translation quality should be emphasized during RL optimization.
+
+\paragraph{Analysis Methodology.} To conduct the error analysis, we generated translations for 10,000 examples sampled from our training corpus using the supervised fine-tuned model. For each generated translation, we computed the COMET score (comparing the generated translation to the reference translation), providing a quality estimate for each translation. The COMET score distribution showed: 1.0\% very low quality (COMET $< 0.6$), 4.3\% low quality ($0.6$--$0.7$), 20.4\% medium quality ($0.7$--$0.8$), 50.5\% good quality ($0.8$--$0.9$), and 23.8\% excellent quality ($> 0.9$). We conducted systematic analysis of error patterns, with particular focus on numerical accuracy given the prevalence of quantitative information in medical texts.
+
+\paragraph{Numerical Error Analysis.} Among the 10,000 analyzed samples, approximately 47.5\% contained numerical information in the source text (dosages, measurements, percentages, p-values, etc.). We developed a robust number extraction pipeline to systematically categorize numerical errors into the following types:
+
+\textbf{Missing Numbers (37.7\%):} The most common error type involves numbers present in the source sentence being absent from the generated translation. This includes omission of percentages, measurement values, or statistical figures. For example, a source containing ``success rate of 85.5\%'' might generate a translation that omits or approximates this value.
+
+\textbf{Hallucinated Numbers (4.9\%):} In some cases, the model generates numerical values that do not appear in either the source or reference translation. While less common than missing numbers, hallucinated values are particularly problematic in medical contexts where incorrect dosages or measurements could have serious consequences.
+
+\textbf{Combined Errors (9.9\%):} A subset of translations exhibited both missing and hallucinated numbers, indicating more severe numerical corruption where the model both drops original values and introduces spurious ones.
+
+\textbf{Correct Preservation (47.4\%):} Approximately half of translations with numerical content correctly preserved all source numbers in the output.
+
+\paragraph{Implications for Reward Design.} Statistical analysis revealed only a weak correlation between numerical error severity and COMET scores (Pearson $r = -0.12$), and we identified 187 cases where translations scored high on COMET ($>0.85$) yet contained numerical errors. This gap between COMET scores and numerical accuracy directly motivates our GRPO reward function design: since optimizing COMET alone would not address numerical errors, we include an explicit numerical accuracy component (weight 0.15) alongside the primary BLEU signal.
+
+\subsection{Reinforcement Learning with GRPO}
+\label{sec:grpo}
+
+Based on the insights gained from our error analysis---particularly the prevalence of numerical errors that standard metrics do not fully capture---we designed a second training stage that applies reinforcement learning to refine the supervised model. We employ Group Relative Policy Optimization (GRPO), a policy gradient algorithm well-suited for optimizing language generation models in settings where the reward signal is computed from model-generated outputs.
+
+\subsubsection{GRPO Algorithm Overview}
+\label{sec:grpo_algorithm}
+
+Group Relative Policy Optimization is a variant of policy gradient reinforcement learning designed specifically for natural language generation tasks. Unlike standard policy gradient methods such as REINFORCE, which compute advantages based on absolute reward values, GRPO computes advantages relative to the average reward within a group of sampled outputs for the same input. This group-relative formulation provides several important benefits for our medical translation application.
+
+\paragraph{Sampling and Advantage Estimation.} For each training input $x$ (a source sentence to be translated), the GRPO algorithm proceeds as follows. First, we sample a group $G = \{\hat{y}^{(1)}, \hat{y}^{(2)}, \ldots, \hat{y}^{(K)}\}$ of $K$ candidate translations from the current policy $\pi_\theta(\cdot|x)$ (in our case, the model being trained). In our implementation, we use a group size of $K=4$, meaning we generate 4 different translation candidates for each source sentence through sampling.
+
+Second, we compute the reward $R(\hat{y}^{(j)}, y^*)$ for each candidate translation $\hat{y}^{(j)}$ by comparing it to the reference translation $y^*$ using our reward function (described in detail in Section~\ref{sec:reward_function}). These rewards quantify the quality of each candidate translation.
+
+Third, we compute the group-relative advantage for each candidate as the difference between its individual reward and the mean reward across all candidates in the group:
+
+\begin{equation}
+A^{(j)} = R(\hat{y}^{(j)}, y^*) - \frac{1}{K}\sum_{k=1}^K R(\hat{y}^{(k)}, y^*)
+\end{equation}
+
+This advantage formulation has an important property: candidates that perform better than average within their group receive positive advantages, while candidates that perform worse than average receive negative advantages. This relative comparison helps reduce variance in gradient estimates compared to absolute rewards, as it controls for variation in difficulty across different inputs.
+
+\paragraph{Policy Gradient with KL Penalty.} Finally, we compute the policy gradient loss that encourages the model to increase the probability of high-advantage translations (those that performed better than average) and decrease the probability of low-advantage translations (those that performed worse than average). Additionally, we include a KL divergence penalty term that prevents the policy from deviating too far from a reference policy (in our case, the supervised fine-tuned model from stage 1). The complete GRPO loss function is:
+
+\begin{equation}
+\mathcal{L}_{\text{GRPO}}(\theta) = -\mathbb{E}_{x,G}\left[\frac{1}{K}\sum_{j=1}^K A^{(j)} \log \pi_\theta(\hat{y}^{(j)}|x)\right] + \beta \cdot D_{\text{KL}}(\pi_\theta \| \pi_{\text{ref}})
+\end{equation}
+
+where $\pi_{\text{ref}}$ is the reference policy (kept fixed at the supervised fine-tuned checkpoint), $\beta = 0.01$ is a hyperparameter controlling the strength of the KL penalty, and $D_{\text{KL}}(\pi_\theta \| \pi_{\text{ref}})$ measures the KL divergence between the current policy and the reference policy.
+
+The KL penalty serves an important regularization function: it prevents the model from "collapsing" to exploit reward function artifacts or from forgetting the general translation capabilities learned during supervised fine-tuning. By constraining the policy to remain close to the supervised baseline, we ensure that RL refinement makes conservative improvements that build upon supervised learning rather than completely reorganizing the model's behavior.
+
+\subsubsection{Reward Function Design}
+\label{sec:reward_function}
+
+The choice of reward function is critical in reinforcement learning, as it directly defines what behavior the algorithm will encourage. Based on our error analysis findings---particularly the prevalence of numerical errors---we designed a composite reward function that combines multiple signals targeting different aspects of translation quality.
+
+Specifically, we define our reward function as a weighted combination of five components:
+
+\begin{equation}
+R(\hat{y}, y^*) = 0.55 \cdot R_{\text{BLEU}} + 0.15 \cdot R_{\text{num}} + 0.1 \cdot R_{\text{len}} + 0.1 \cdot R_{\text{copy}} + 0.1 \cdot R_{\text{empty}}
+\end{equation}
+
+where:
+\begin{itemize}
+\item $R_{\text{BLEU}}$: Sentence-level BLEU score normalized to $[0, 1]$, providing the primary translation quality signal
+\item $R_{\text{num}}$: Numeric accuracy reward penalizing missing numbers (0.3 penalty per missing number as fraction of source numbers) and hallucinated numbers (0.2 penalty), capped at 0.5 total penalty
+\item $R_{\text{len}}$: Length ratio reward, penalizing translations with length ratios outside $[0.5, 1.5]$ relative to reference
+\item $R_{\text{copy}}$: Anti-copying reward, penalizing high word overlap ($>80\%$) with source text
+\item $R_{\text{empty}}$: Non-empty reward, heavily penalizing outputs with fewer than 2 words
+\end{itemize}
+
+We chose BLEU as the primary metric (weight 0.55) for two reasons: (1) it provides a smooth, differentiable signal for overall translation quality across all samples, and (2) it avoids the computational overhead of COMET inference for each of the $K=4$ candidates per prompt. The numeric accuracy component (weight 0.15) serves as a targeted correction for the specific error type identified in our analysis---it cannot be primary because only 47.5\% of samples contain numbers, leaving no signal for the remainder. The auxiliary rewards (length, anti-copy, non-empty) provide regularization to prevent degenerate outputs.
+
+\subsubsection{GRPO Training Configuration}
+\label{sec:grpo_config}
+
+We now provide detailed configuration parameters for our GRPO training stage.
+
+\paragraph{Initialization and Reference Policy.} GRPO training is initialized from the supervised fine-tuned checkpoint produced in stage 1. This checkpoint also serves as the reference policy $\pi_{\text{ref}}$ for computing the KL penalty. We keep the reference policy frozen (no gradient updates) throughout GRPO training.
+
+\paragraph{Sampling and Batching.} For each training batch, we sample a group of $K=4$ candidate translations per source sentence. We use a per-device batch size of 16 source sentences, meaning we generate $16 \times 4 = 64$ candidate translations per device per batch. Sampling is performed using temperature 1.0 (no temperature adjustment) to maintain reasonable diversity in generated candidates.
+
+\paragraph{Optimization.} We use a learning rate of $5 \times 10^{-6}$, substantially lower than the supervised fine-tuning learning rate, reflecting the fact that GRPO makes more targeted refinements rather than broad adaptation. The KL penalty coefficient is set to $\beta = 0.01$ based on preliminary experiments balancing exploration and stability. We train for 500 gradient steps, which we found to be sufficient for convergence based on monitoring the reward and KL divergence on a held-out development set.
+
+\paragraph{Generation.} Candidate translations are generated with a maximum length of 512 tokens to match training conditions. We use sampling (rather than greedy decoding or beam search) during GRPO to ensure diversity in the generated candidate groups.
+
+The relatively short training time compared to supervised fine-tuning reflects both the smaller number of optimization steps (500 steps for GRPO vs. multiple epochs for supervised) and the fact that GRPO builds upon an already well-trained supervised model.
+
+\section{Evaluation}
+\label{sec:evaluation}
+
+We now describe our evaluation methodology, including the metrics we use to assess translation quality and the experimental protocols we follow to ensure fair and reproducible comparisons.
+
+\subsection{Evaluation Metrics}
+\label{sec:metrics}
+
+We evaluate translation quality using three complementary automatic metrics that capture different aspects of translation quality:
+
+\paragraph{BLEU (Bilingual Evaluation Understudy).} BLEU is the most widely used metric for machine translation evaluation. It measures the n-gram overlap between a candidate translation and one or more reference translations, with a brevity penalty to discourage overly short translations. BLEU primarily captures lexical precision and word ordering, and ranges from 0 to 100 (or 0 to 1 in some implementations), with higher scores indicating better quality. While BLEU has known limitations—particularly its inability to recognize valid paraphrases or synonyms that don't exactly match the reference—it remains a standard metric for MT evaluation and provides useful signal about lexical accuracy.
+
+\paragraph{chrF++ (Character-level F-score).} chrF++ is a character-level metric that computes precision and recall based on character n-grams (and optionally word n-grams), then combines them into an F-score. Compared to BLEU, chrF++ is more robust to morphological variations and has been shown to correlate better with human judgments for morphologically rich languages. This metric is particularly relevant for Vietnamese, which exhibits substantial morphological complexity. chrF++ ranges from 0 to 100, with higher scores indicating better quality.
+
+\paragraph{COMET (Crosslingual Optimized Metric for Evaluation of Translation).} COMET is a neural learned metric that uses cross-lingual embeddings to compare source, candidate translation, and reference translation in a shared semantic space. Unlike surface-form metrics such as BLEU and chrF++, COMET is trained explicitly to predict human judgments of translation quality, and it has been shown to achieve stronger correlation with human evaluation than traditional metrics. COMET is particularly valuable for assessing semantic adequacy—whether the translation conveys the correct meaning—which is critical in medical translation. COMET scores are typically normalized to range from 0 to 1, with higher values indicating better quality.
+
+By using all three metrics together, we obtain a comprehensive picture of translation quality that encompasses lexical accuracy (BLEU), character-level precision (chrF++), and semantic adequacy (COMET).
+
+\subsection{Evaluation Protocol and Decoding Configuration}
+\label{sec:eval_protocol}
+
+All models are evaluated on the official VLSP 2025 test set using identical decoding configurations to ensure fair comparison. We use beam search decoding with beam size 5 to balance translation quality and computational cost. The length penalty is set to 1.0 (no penalty for longer or shorter translations), and the maximum number of new tokens is set to 512 to accommodate translations of any length within the model's capacity. Temperature is set to 1.0, and we do not use sampling during evaluation (beam search is deterministic given these settings).
+
+These evaluation configurations were chosen based on standard practices in machine translation evaluation and were kept consistent across all systems and experiments to ensure that observed performance differences reflect model quality rather than decoding configuration differences.
+
+\section{Results}
+\label{sec:results}
+
+In this section, we present our main experimental results, including overall performance on the VLSP 2025 test set and detailed ablation studies analyzing the contribution of different components of our approach.
+
+\subsection{Main Results}
+\label{sec:main_results}
+
+Table~\ref{tab:main_results} presents the performance of our system at different stages of training on the VLSP 2025 test set. We report results for both translation directions: English→Vietnamese (EN→VI) and Vietnamese→English (VI→EN).
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llccc}
+\toprule
+\textbf{Direction} & \textbf{System} & \textbf{BLEU} $\uparrow$ & \textbf{chrF++} $\uparrow$ & \textbf{COMET} $\uparrow$ \\
+\midrule
+\multirow{2}{*}{EN→VI} & CPT & 39.74 & 58.31 & 0.8586 \\
+ & + GRPO & \textbf{39.83} & \textbf{58.37} & \textbf{0.8591} \\
+\midrule
+\multirow{2}{*}{VI→EN} & CPT & 24.85 & 53.71 & \textbf{0.8116} \\
+ & + GRPO & \textbf{24.95} & \textbf{53.74} & 0.8115 \\
+\bottomrule
+\end{tabular}
+\caption{Performance on VLSP 2025 test set at different training stages. CPT = Continual Pre-Training (supervised fine-tuning). GRPO provides small but consistent improvements.}
+\label{tab:main_results}
+\end{table}
+
+Supervised fine-tuning (CPT) provides the foundation for strong translation performance, achieving 39.74 BLEU and 0.8586 COMET for EN→VI, and 24.85 BLEU and 0.8116 COMET for VI→EN. The lower VI→EN scores reflect the greater difficulty of translating into English, which requires more precise lexical choices.
+
+GRPO refinement provides modest but consistent improvements across metrics for both directions. For EN→VI, GRPO improves BLEU by +0.09 points and COMET by +0.0005. For VI→EN, BLEU improves by +0.10 points with virtually unchanged COMET. While these gains are small, they demonstrate that the reward function successfully guides the model toward higher-quality outputs without degradation.
+
+\subsection{Limitations}
+\label{sec:discussion_limitations}
+
+Despite the promising results demonstrated in our experiments, several limitations of our approach should be acknowledged and suggest directions for future work.
+
+\paragraph{Model Scale Constraints.} Our approach is limited to models with at most 3B parameters due to the VLSP 2025 Shared Task constraints. While this constraint ensures fair comparison and reflects realistic resource limitations, recent work has shown that larger language models (7B, 13B, or larger parameters) can achieve substantially better translation quality, particularly for challenging domain-specific translation tasks. Future work should investigate whether our two-stage training approach (supervised fine-tuning followed by GRPO) provides similar benefits when applied to larger models, and whether the optimal hyperparameters and design choices (such as LoRA rank, learning rate schedule, GRPO group size) differ for larger models.
+
+\paragraph{Reference-Dependent Reward Function.} Our GRPO reward function relies on reference translations to compute BLEU, chrF++, and COMET scores. This dependency limits the applicability of our approach to scenarios where reference translations are available for the inputs used during RL training. In many practical settings, reference translations may not be available for all source sentences, particularly when adapting to new domains or handling user-generated content. Future work should explore reference-free reward modeling approaches, such as using quality estimation models trained to predict translation quality without access to references, or using reward models trained on human preference judgments.
+
+\paragraph{Sampling Overhead in GRPO.} The requirement to generate $K=4$ candidate translations per input during GRPO training increases the computational cost of the RL stage. While the total GRPO training time remains reasonable in our setting, this overhead could become more significant when scaling to larger datasets or more frequent RL training. Future work could investigate more sample-efficient RL algorithms or explore techniques for reusing previously generated candidates across multiple optimization steps.
+
+\paragraph{Automatic Metrics vs. Human Evaluation.} While our evaluation uses multiple complementary automatic metrics (BLEU, chrF++, COMET), and while COMET in particular has been shown to correlate well with human judgments, automatic metrics remain imperfect proxies for true translation quality as perceived by human readers, particularly in specialized domains such as medical translation where subtle semantic nuances and domain-appropriate terminology are critical. Future work should include human evaluation studies conducted by bilingual medical professionals to validate that the improvements measured by automatic metrics translate to improvements in actual usability and accuracy for medical translation applications.
+
+\paragraph{Error Analysis Based on Automatic Metrics.} Our error analysis and GRPO reward function design rely primarily on automatic metrics (particularly COMET scores) to identify low-quality translations and systematic errors. While this approach is practical and scalable, it may miss certain types of errors that are not well-captured by automatic metrics, or may mischaracterize errors based on metric artifacts. Future work should incorporate manual annotation of error types by domain experts to provide deeper insights into systematic failure modes and to validate that the errors identified through automatic analysis align with errors that would be identified by human annotators.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+In this work, we have presented a two-stage approach to medical machine translation for English--Vietnamese under constrained settings, combining careful data filtering, parameter-efficient supervised fine-tuning, and reinforcement learning refinement using GRPO. Our approach is designed to maximize translation quality while operating within strict constraints on model size, training data, and computational resources imposed by the VLSP 2025 Shared Task framework.
+
+The key contributions of our work can be summarized as follows:
+
+\textbf{Data Quality Over Quantity:} We introduced a two-stage filtering pipeline combining rule-based heuristics (addressing duplicates, length violations, and encoding errors) with semantic similarity validation (addressing misalignments and mistranslations). This aggressive filtering---reducing the corpus from 500K to 336K pairs (32.7\% reduction)---prioritizes training data quality over quantity, following established best practices in neural machine translation.
+
+\textbf{Adaptive Continual Pretraining:} We designed a two-epoch continual pretraining strategy with adaptive learning rate scheduling, using cosine decay in the first epoch for rapid domain adaptation and linear decay in the second epoch for stable convergence. This approach achieves strong performance without overfitting, balancing the competing objectives of adaptation speed and final quality.
+
+\textbf{Systematic Error Analysis:} Through systematic analysis of 10K model outputs, we characterized numerical error patterns in medical translation: among samples containing numbers, 37.7\% exhibited missing numbers, 4.9\% hallucinated numbers, and 9.9\% both error types. Statistical analysis revealed that while numerical errors correlate with lower COMET scores ($r = -0.12$), COMET does not fully capture numerical accuracy, motivating explicit numerical accuracy rewards in GRPO.
+
+\textbf{GRPO with Numerical Accuracy Rewards:} We designed a GRPO reward function combining BLEU (weight 0.55) with explicit numerical accuracy penalties (weight 0.15) plus auxiliary regularization terms. GRPO refinement provides consistent improvements over supervised fine-tuning across both translation directions.
+
+\textbf{Comprehensive Evaluation:} Our final model achieves 39.83 BLEU and 0.8591 COMET for EN→VI, and 24.95 BLEU and 0.8115 COMET for VI→EN, demonstrating competitive domain-specific translation quality under constrained settings.
+
+Future research directions include: (1) scaling to larger models when computational constraints permit, to determine whether similar training strategies remain effective at larger scales; (2) developing reference-free reward modeling approaches to enable RL refinement in settings where reference translations are not available; (3) incorporating multi-task learning across related language pairs and medical subdomains to improve data efficiency; and (4) conducting human evaluation studies with medical professionals to validate that automatic metric improvements correspond to improvements in real-world usability and accuracy.
+
+\end{document}

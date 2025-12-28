@@ -15,9 +15,12 @@ dataset:
   # local_path: dataset/grpo_gold/gold_3k.csv  # Alternative: local file
   max_samples: null  # Use all samples
 
-# Quantization (4-bit for memory efficiency)
+# Quantization settings
+# NOTE: 4-bit quantization does NOT support multi-GPU DDP!
+# Set load_in_4bit: false to use both GPUs with accelerate
+# Qwen2.5-3B in bf16 is ~6GB, fits easily on RTX 5090 (32GB)
 quantization:
-  load_in_4bit: true
+  load_in_4bit: false  # Disabled for multi-GPU support
   bnb_4bit_compute_dtype: bfloat16
   bnb_4bit_quant_type: nf4
   bnb_4bit_use_double_quant: true

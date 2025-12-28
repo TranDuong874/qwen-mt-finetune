@@ -187,6 +187,7 @@ def evaluate(
         split=test_split,
         streaming=False,
         token=os.getenv("HUGGING_FACE_TOKEN"),
+        download_mode="force_redownload",
     )
 
     # Compute perplexity

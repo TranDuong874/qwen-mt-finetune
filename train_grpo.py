@@ -2,14 +2,16 @@
 GRPO (Group Relative Policy Optimization) training for Qwen translation model.
 Uses reward functions to improve translation quality beyond supervised learning.
 
-Launch with: accelerate launch train_grpo.py --config config_grpo.yaml
+Multi-GPU support:
+  accelerate launch --multi_gpu --num_processes 2 train_grpo.py --config config_grpo.yaml
+
+Single GPU (with optional 4-bit quantization):
+  python train_grpo.py --config config_grpo.yaml
 """
 import argparse
-import gc
-import math
 import os
 import time
-from typing import Dict, List, Callable
+from typing import Dict, List
 
 import torch
 import wandb
@@ -603,16 +605,31 @@ def compute_grpo_loss(
 
 
 def train(config: dict):
-    """Main GRPO training function."""
+    """Main GRPO training function with multi-GPU support."""
     set_seed(42)
 
+    # Check quantization settings
+    quant_cfg = config.get("quantization", {})
+    use_quantization = quant_cfg.get("load_in_4bit", False)
+
     # Initialize accelerator
+    # Note: When using quantization, we can't use multi-GPU DDP
     accelerator = Accelerator(
         gradient_accumulation_steps=config.get("training", {}).get(
             "gradient_accumulation_steps", 4
         ),
         mixed_precision="bf16" if config.get("training", {}).get("bf16", True) else "no",
     )
+
+    # Warn if trying to use quantization with multi-GPU
+    if use_quantization and accelerator.num_processes > 1:
+        accelerator.print(
+            "\n" + "=" * 60 +
+            "\nWARNING: 4-bit quantization does not support multi-GPU DDP!"
+            "\nFalling back to single GPU mode."
+            "\nTo use multi-GPU, set quantization.load_in_4bit: false in config."
+            "\n" + "=" * 60 + "\n"
+        )
 
     # Setup W&B
     wandb_cfg = config.get("wandb", {})
@@ -625,23 +642,21 @@ def train(config: dict):
             config=config,
         )
 
-    # Load COMET model for rewards (all processes need it for reward computation)
+    # Load COMET model for rewards (only on main process to avoid memory waste)
     reward_cfg = config.get("reward", {})
     comet_model = None
-    if reward_cfg.get("use_comet", True):
+    if reward_cfg.get("use_comet", True) and accelerator.is_main_process:
         accelerator.print("Loading COMET model for rewards...")
         from comet import download_model, load_from_checkpoint
         comet_path = download_model(
             reward_cfg.get("comet_model", "Unbabel/wmt22-comet-da")
         )
         comet_model = load_from_checkpoint(comet_path)
-        accelerator.wait_for_everyone()  # Sync after loading
+    accelerator.wait_for_everyone()
 
-    # Quantization config
-    quant_cfg = config.get("quantization", {})
-    use_quantization = quant_cfg.get("load_in_4bit", False)
-
+    # Model loading strategy depends on quantization
     if use_quantization:
+        # Single GPU with quantization
         compute_dtype = getattr(
             torch, quant_cfg.get("bnb_4bit_compute_dtype", "bfloat16")
         )
@@ -651,25 +666,23 @@ def train(config: dict):
             bnb_4bit_compute_dtype=compute_dtype,
             bnb_4bit_use_double_quant=quant_cfg.get("bnb_4bit_use_double_quant", True),
         )
-    else:
-        bnb_config = None
-
-    # Load model
-    accelerator.print(f"Loading base model: {config['base_model']}")
-    model_kwargs = {
-        "trust_remote_code": True,
-        "torch_dtype": torch.bfloat16,
-    }
-    if use_quantization:
-        model_kwargs["quantization_config"] = bnb_config
-        model_kwargs["device_map"] = {"": accelerator.local_process_index}
-
-    base_model = AutoModelForCausalLM.from_pretrained(
-        config["base_model"], **model_kwargs
-    )
-
-    if use_quantization:
+        accelerator.print(f"Loading base model with 4-bit quantization: {config['base_model']}")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            config["base_model"],
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16,
+            quantization_config=bnb_config,
+            device_map={"": accelerator.local_process_index},
+        )
         base_model = prepare_model_for_kbit_training(base_model)
+    else:
+        # Multi-GPU support: load without device_map, let accelerate handle distribution
+        accelerator.print(f"Loading base model (bf16, multi-GPU ready): {config['base_model']}")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            config["base_model"],
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16,
+        )
 
     # Load adapter
     adapter_path = config.get("adapter_path")
@@ -695,10 +708,14 @@ def train(config: dict):
     tokenizer.padding_side = "left"
 
     model.enable_input_require_grads()
+
+    # Print training info
     if accelerator.is_main_process:
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
         accelerator.print(f"Trainable params: {trainable:,} / {total:,}")
+        accelerator.print(f"Number of GPUs: {accelerator.num_processes}")
+        accelerator.print(f"Quantization: {'4-bit' if use_quantization else 'disabled (bf16)'}")
 
     # Dataset
     dataset_cfg = config.get("dataset", {})
@@ -750,10 +767,18 @@ def train(config: dict):
         num_training_steps=max_train_steps,
     )
 
-    # Prepare
-    model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, lr_scheduler
-    )
+    # Prepare with accelerator
+    # For quantized models, we only prepare optimizer, dataloader, scheduler
+    # For non-quantized, we prepare everything including model
+    if use_quantization:
+        optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            optimizer, train_dataloader, lr_scheduler
+        )
+        # Model stays on its designated GPU
+    else:
+        model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            model, optimizer, train_dataloader, lr_scheduler
+        )
 
     # Reward combiner
     reward_combiner = RewardCombiner(
@@ -782,7 +807,8 @@ def train(config: dict):
     accelerator.print(f"\n{'='*60}")
     accelerator.print("GRPO Training Configuration:")
     accelerator.print(f"  Dataset size: {len(train_dataset)}")
-    accelerator.print(f"  Batch size: {train_cfg.get('per_device_batch_size', 2)}")
+    accelerator.print(f"  Per-device batch size: {train_cfg.get('per_device_batch_size', 2)}")
+    accelerator.print(f"  Effective batch size: {train_cfg.get('per_device_batch_size', 2) * accelerator.num_processes * accelerator.gradient_accumulation_steps}")
     accelerator.print(f"  Num generations per prompt: {num_generations}")
     accelerator.print(f"  Max train steps: {max_train_steps}")
     accelerator.print(f"  Temperature: {temperature}")
@@ -805,9 +831,13 @@ def train(config: dict):
         for batch in progress_bar:
             t_start = time.time()
 
-            # Generate responses (disable grad checkpointing for fast KV cache)
+            # Generate responses
             unwrapped = accelerator.unwrap_model(model)
-            unwrapped.gradient_checkpointing_disable()
+
+            # Disable gradient checkpointing for generation (faster with KV cache)
+            if hasattr(unwrapped, 'gradient_checkpointing_disable'):
+                unwrapped.gradient_checkpointing_disable()
+
             model.eval()
             with torch.no_grad():
                 responses = generate_responses(
@@ -821,7 +851,10 @@ def train(config: dict):
                     top_p=top_p,
                 )
             model.train()
-            unwrapped.gradient_checkpointing_enable()
+
+            if hasattr(unwrapped, 'gradient_checkpointing_enable'):
+                unwrapped.gradient_checkpointing_enable()
+
             t_gen = time.time()
 
             # Flatten all responses for batched reward computation
